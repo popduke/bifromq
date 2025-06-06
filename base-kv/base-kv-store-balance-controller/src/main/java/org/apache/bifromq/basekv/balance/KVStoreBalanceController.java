@@ -1,18 +1,48 @@
 /*
- * Copyright (c) 2023. The BifroMQ Authors. All Rights Reserved.
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and limitations under the License.
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package org.apache.bifromq.basekv.balance;
 
+import com.google.common.collect.Lists;
+import com.google.protobuf.Struct;
+import com.google.protobuf.Value;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.Timer.Sample;
+import io.reactivex.rxjava3.disposables.CompositeDisposable;
+import java.time.Duration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import lombok.Builder;
 import org.apache.bifromq.basekv.balance.command.BalanceCommand;
 import org.apache.bifromq.basekv.balance.command.BootstrapCommand;
 import org.apache.bifromq.basekv.balance.command.ChangeConfigCommand;
@@ -41,31 +71,7 @@ import org.apache.bifromq.basekv.store.proto.RecoverRequest;
 import org.apache.bifromq.basekv.store.proto.ReplyCode;
 import org.apache.bifromq.basekv.store.proto.TransferLeadershipReply;
 import org.apache.bifromq.basekv.store.proto.TransferLeadershipRequest;
-import org.apache.bifromq.logger.SiftLogger;
-import com.google.common.collect.Lists;
-import com.google.protobuf.Struct;
-import com.google.protobuf.Value;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.Metrics;
-import io.micrometer.core.instrument.Tags;
-import io.micrometer.core.instrument.Timer;
-import io.micrometer.core.instrument.Timer.Sample;
-import io.reactivex.rxjava3.disposables.CompositeDisposable;
-import java.time.Duration;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ThreadLocalRandom;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.stream.Collectors;
-import lombok.Builder;
+import org.apache.bifromq.logger.MDCLogger;
 import org.slf4j.Logger;
 
 /**
@@ -126,8 +132,7 @@ public class KVStoreBalanceController {
     public void start(String localStoreId) {
         if (state.compareAndSet(State.Init, State.Started)) {
             this.localStoreId = localStoreId;
-            log =
-                SiftLogger.getLogger("balancer.logger", "clusterId", storeClient.clusterId(), "storeId", localStoreId);
+            log = MDCLogger.getLogger("balancer.logger", "clusterId", storeClient.clusterId(), "storeId", localStoreId);
 
             for (IStoreBalancerFactory factory : builtinBalancerFactories) {
                 StoreBalancer balancer = factory.newBalancer(storeClient.clusterId(), localStoreId);

@@ -1,36 +1,34 @@
 /*
- * Copyright (c) 2024. The BifroMQ Authors. All Rights Reserved.
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and limitations under the License.
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.    
  */
 
 package org.apache.bifromq.baserpc.client;
 
+import static io.grpc.stub.ClientCalls.asyncUnaryCall;
 import static org.apache.bifromq.baserpc.RPCContext.DESIRED_SERVER_ID_CTX_KEY;
 import static org.apache.bifromq.baserpc.RPCContext.TENANT_ID_CTX_KEY;
 import static org.apache.bifromq.baserpc.client.exception.ExceptionUtil.toConcreteException;
-import static io.grpc.stub.ClientCalls.asyncUnaryCall;
 
-import org.apache.bifromq.baserpc.BluePrint;
-import org.apache.bifromq.baserpc.client.exception.ServerNotFoundException;
-import org.apache.bifromq.baserpc.client.exception.ServiceUnavailableException;
-import org.apache.bifromq.baserpc.client.loadbalancer.IServerGroupRouter;
-import org.apache.bifromq.baserpc.client.loadbalancer.IServerSelector;
-import org.apache.bifromq.baserpc.metrics.IRPCMeter;
-import org.apache.bifromq.baserpc.metrics.RPCMetric;
 import io.grpc.CallOptions;
 import io.grpc.Channel;
 import io.grpc.Context;
 import io.grpc.MethodDescriptor;
 import io.grpc.stub.StreamObserver;
-import jakarta.annotation.Nullable;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -39,6 +37,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.bifromq.baserpc.BluePrint;
+import org.apache.bifromq.baserpc.client.exception.ServerNotFoundException;
+import org.apache.bifromq.baserpc.client.exception.ServiceUnavailableException;
+import org.apache.bifromq.baserpc.client.loadbalancer.IServerGroupRouter;
+import org.apache.bifromq.baserpc.client.loadbalancer.IServerSelector;
+import org.apache.bifromq.baserpc.metrics.IRPCMeter;
+import org.apache.bifromq.baserpc.metrics.RPCMetric;
 
 @Slf4j
 class UnaryCaller<ReqT, RespT> implements IUnaryCaller<ReqT, RespT> {
@@ -71,7 +76,7 @@ class UnaryCaller<ReqT, RespT> implements IUnaryCaller<ReqT, RespT> {
     @SneakyThrows
     @Override
     public CompletableFuture<RespT> invoke(String tenantId,
-                                           @Nullable String targetServerId,
+                                           String targetServerId,
                                            ReqT req,
                                            Map<String, String> metadata) {
         IServerSelector serverSelector = serverSelectorSupplier.get();

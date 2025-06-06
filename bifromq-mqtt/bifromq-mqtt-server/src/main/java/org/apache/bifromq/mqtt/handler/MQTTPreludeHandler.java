@@ -1,36 +1,32 @@
 /*
- * Copyright (c) 2023. The BifroMQ Authors. All Rights Reserved.
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and limitations under the License.
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.    
  */
 
 package org.apache.bifromq.mqtt.handler;
 
-import static org.apache.bifromq.plugin.eventcollector.ThreadLocalEventPool.getLocal;
 import static io.netty.handler.codec.mqtt.MqttConnectReturnCode.CONNECTION_REFUSED_CLIENT_IDENTIFIER_NOT_VALID;
 import static io.netty.handler.codec.mqtt.MqttConnectReturnCode.CONNECTION_REFUSED_IDENTIFIER_REJECTED;
 import static io.netty.handler.codec.mqtt.MqttConnectReturnCode.CONNECTION_REFUSED_MALFORMED_PACKET;
 import static io.netty.handler.codec.mqtt.MqttConnectReturnCode.CONNECTION_REFUSED_PACKET_TOO_LARGE;
 import static io.netty.handler.codec.mqtt.MqttMessageType.CONNECT;
 import static io.netty.handler.codec.mqtt.MqttMessageType.PUBLISH;
+import static org.apache.bifromq.plugin.eventcollector.ThreadLocalEventPool.getLocal;
 
-import org.apache.bifromq.mqtt.handler.v3.MQTT3ConnectHandler;
-import org.apache.bifromq.mqtt.handler.v5.MQTT5ConnectHandler;
-import org.apache.bifromq.mqtt.handler.v5.MQTT5MessageBuilders;
-import org.apache.bifromq.plugin.eventcollector.Event;
-import org.apache.bifromq.plugin.eventcollector.IEventCollector;
-import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.ChannelError;
-import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.ConnectTimeout;
-import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.IdentifierRejected;
-import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.ProtocolError;
-import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.UnacceptedProtocolVer;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
@@ -42,12 +38,21 @@ import io.netty.handler.codec.mqtt.MqttMessage;
 import io.netty.handler.codec.mqtt.MqttMessageBuilders;
 import io.netty.handler.codec.mqtt.MqttPublishMessage;
 import io.netty.handler.codec.mqtt.MqttUnacceptableProtocolVersionException;
-import jakarta.annotation.Nullable;
 import java.net.InetSocketAddress;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.bifromq.mqtt.handler.v3.MQTT3ConnectHandler;
+import org.apache.bifromq.mqtt.handler.v5.MQTT5ConnectHandler;
+import org.apache.bifromq.mqtt.handler.v5.MQTT5MessageBuilders;
+import org.apache.bifromq.plugin.eventcollector.Event;
+import org.apache.bifromq.plugin.eventcollector.IEventCollector;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.ChannelError;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.ConnectTimeout;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.IdentifierRejected;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.ProtocolError;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.UnacceptedProtocolVer;
 
 @Slf4j
 public class MQTTPreludeHandler extends ChannelDuplexHandler {
@@ -210,7 +215,7 @@ public class MQTTPreludeHandler extends ChannelDuplexHandler {
         closeChannelWithRandomDelay(reason, null);
     }
 
-    private void closeChannelWithRandomDelay(Event<?> reason, @Nullable MqttMessage farewell) {
+    private void closeChannelWithRandomDelay(Event<?> reason, MqttMessage farewell) {
         if (timeoutCloseTask != null) {
             timeoutCloseTask.cancel(true);
         }

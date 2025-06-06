@@ -1,14 +1,20 @@
 /*
- * Copyright (c) 2023. The BifroMQ Authors. All Rights Reserved.
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and limitations under the License.
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
  */
 
 package org.apache.bifromq.basekv.server;
@@ -17,6 +23,11 @@ import static org.apache.bifromq.base.util.CompletableFutureUtil.unwrap;
 import static org.apache.bifromq.basekv.utils.BoundaryUtil.FULL_BOUNDARY;
 import static org.apache.bifromq.baserpc.server.UnaryResponse.response;
 
+import com.google.common.collect.Sets;
+import io.grpc.stub.StreamObserver;
+import io.reactivex.rxjava3.disposables.CompositeDisposable;
+import lombok.Setter;
+import lombok.experimental.Accessors;
 import org.apache.bifromq.basecluster.IAgentHost;
 import org.apache.bifromq.basekv.metaservice.IBaseKVClusterMetadataManager;
 import org.apache.bifromq.basekv.store.IKVRangeStore;
@@ -42,12 +53,7 @@ import org.apache.bifromq.basekv.store.proto.ReplyCode;
 import org.apache.bifromq.basekv.store.proto.TransferLeadershipReply;
 import org.apache.bifromq.basekv.store.proto.TransferLeadershipRequest;
 import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
-import org.apache.bifromq.logger.SiftLogger;
-import com.google.common.collect.Sets;
-import io.grpc.stub.StreamObserver;
-import io.reactivex.rxjava3.disposables.CompositeDisposable;
-import lombok.Setter;
-import lombok.experimental.Accessors;
+import org.apache.bifromq.logger.MDCLogger;
 import org.slf4j.Logger;
 
 @Accessors(fluent = true)
@@ -71,7 +77,7 @@ class BaseKVStoreService extends BaseKVStoreServiceGrpc.BaseKVStoreServiceImplBa
             builder.attributes);
         this.clusterId = builder.clusterId;
         this.agentHost = builder.agentHost;
-        log = SiftLogger.getLogger(BaseKVStoreService.class, "clusterId", clusterId, "storeId", kvRangeStore.id());
+        log = MDCLogger.getLogger(BaseKVStoreService.class, "clusterId", clusterId, "storeId", kvRangeStore.id());
         metadataManager = builder.serverBuilder.metaService.metadataManager(clusterId);
     }
 

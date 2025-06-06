@@ -1,20 +1,32 @@
 /*
- * Copyright (c) 2023. The BifroMQ Authors. All Rights Reserved.
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and limitations under the License.
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.    
  */
 
 package org.apache.bifromq.basekv.store.wal;
 
 import static org.apache.bifromq.basekv.store.wal.KVRangeWALKeys.KEY_LATEST_SNAPSHOT_BYTES;
 
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import org.apache.bifromq.basekv.localengine.IKVEngine;
 import org.apache.bifromq.basekv.localengine.IWALableKVEngineConfigurator;
 import org.apache.bifromq.basekv.localengine.IWALableKVSpace;
@@ -23,13 +35,7 @@ import org.apache.bifromq.basekv.proto.KVRangeId;
 import org.apache.bifromq.basekv.raft.proto.Snapshot;
 import org.apache.bifromq.basekv.store.exception.KVRangeStoreException;
 import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
-import org.apache.bifromq.logger.SiftLogger;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
+import org.apache.bifromq.logger.MDCLogger;
 import org.slf4j.Logger;
 
 /**
@@ -47,7 +53,7 @@ public class KVRangeWALStorageEngine implements IKVRangeWALStoreEngine {
                                    IWALableKVEngineConfigurator configurator) {
         this.clusterId = clusterId;
         kvEngine = KVEngineFactory.createWALable(overrideIdentity, configurator);
-        log = SiftLogger.getLogger(KVRangeWALStorageEngine.class, "clusterId", clusterId, "storeId", kvEngine.id());
+        log = MDCLogger.getLogger(KVRangeWALStorageEngine.class, "clusterId", clusterId, "storeId", kvEngine.id());
     }
 
     @Override

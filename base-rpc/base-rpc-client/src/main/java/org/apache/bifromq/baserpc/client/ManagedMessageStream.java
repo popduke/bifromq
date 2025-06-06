@@ -1,32 +1,37 @@
 /*
- * Copyright (c) 2024. The BifroMQ Authors. All Rights Reserved.
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and limitations under the License.
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.    
  */
 
 package org.apache.bifromq.baserpc.client;
 
-import org.apache.bifromq.baserpc.BluePrint;
-import org.apache.bifromq.baserpc.client.exception.RequestRejectedException;
-import org.apache.bifromq.baserpc.metrics.IRPCMeter;
-import org.apache.bifromq.baserpc.metrics.RPCMetric;
 import io.grpc.CallOptions;
 import io.grpc.MethodDescriptor;
 import io.reactivex.rxjava3.subjects.PublishSubject;
-import jakarta.annotation.Nullable;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.bifromq.baserpc.BluePrint;
+import org.apache.bifromq.baserpc.client.exception.RequestRejectedException;
+import org.apache.bifromq.baserpc.metrics.IRPCMeter;
+import org.apache.bifromq.baserpc.metrics.RPCMetric;
 
 @Slf4j
 class ManagedMessageStream<MsgT, AckT> extends ManagedBiDiStream<AckT, MsgT>
@@ -39,8 +44,8 @@ class ManagedMessageStream<MsgT, AckT> extends ManagedBiDiStream<AckT, MsgT>
     private final AtomicBoolean isClosed = new AtomicBoolean(false);
 
     ManagedMessageStream(String tenantId,
-                         @Nullable String wchKey,
-                         @Nullable String targetServerId,
+                         String wchKey,
+                         String targetServerId,
                          Supplier<Map<String, String>> metadataSupplier,
                          IClientChannel channelHolder,
                          CallOptions callOptions,

@@ -1,24 +1,58 @@
 /*
- * Copyright (c) 2023. The BifroMQ Authors. All Rights Reserved.
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
  *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *    http://www.apache.org/licenses/LICENSE-2.0
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing,
- * software distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and limitations under the License.
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.    
  */
 
 package org.apache.bifromq.basekv.store;
 
+import static java.util.Collections.emptyList;
 import static org.apache.bifromq.basekv.InProcStores.regInProcStore;
 import static org.apache.bifromq.basekv.proto.State.StateType.Normal;
 import static org.apache.bifromq.basekv.store.exception.KVRangeStoreException.rangeNotFound;
 import static org.apache.bifromq.basekv.store.util.ExecutorServiceUtil.awaitShutdown;
-import static java.util.Collections.emptyList;
 
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Maps;
+import com.google.protobuf.ByteString;
+import io.micrometer.core.instrument.Metrics;
+import io.micrometer.core.instrument.Tags;
+import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
+import io.reactivex.rxjava3.core.Observable;
+import io.reactivex.rxjava3.disposables.CompositeDisposable;
+import io.reactivex.rxjava3.subjects.BehaviorSubject;
+import io.reactivex.rxjava3.subjects.Subject;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.stream.Collectors;
+import lombok.NonNull;
 import org.apache.bifromq.base.util.AsyncRunner;
 import org.apache.bifromq.baseenv.EnvProvider;
 import org.apache.bifromq.basehlc.HLC;
@@ -52,35 +86,7 @@ import org.apache.bifromq.basekv.store.stats.IStatsCollector;
 import org.apache.bifromq.basekv.store.wal.IKVRangeWALStore;
 import org.apache.bifromq.basekv.store.wal.KVRangeWALStorageEngine;
 import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
-import org.apache.bifromq.logger.SiftLogger;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Maps;
-import com.google.protobuf.ByteString;
-import io.micrometer.core.instrument.Metrics;
-import io.micrometer.core.instrument.Tags;
-import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
-import io.reactivex.rxjava3.core.Observable;
-import io.reactivex.rxjava3.disposables.CompositeDisposable;
-import io.reactivex.rxjava3.subjects.BehaviorSubject;
-import io.reactivex.rxjava3.subjects.Subject;
-import java.time.Duration;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.CompletionStage;
-import java.util.concurrent.Executor;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.ScheduledThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.stream.Collectors;
-import lombok.NonNull;
+import org.apache.bifromq.logger.MDCLogger;
 import org.slf4j.Logger;
 
 public class KVRangeStore implements IKVRangeStore {
@@ -121,7 +127,7 @@ public class KVRangeStore implements IKVRangeStore {
             new KVRangeWALStorageEngine(clusterId, opts.getOverrideIdentity(), opts.getWalEngineConfigurator());
         id = walStorageEngine.id();
         String[] tags = new String[] {"clusterId", clusterId, "storeId", id};
-        log = SiftLogger.getLogger(KVRangeStore.class, tags);
+        log = MDCLogger.getLogger(KVRangeStore.class, tags);
         if (opts.getOverrideIdentity() != null
             && !opts.getOverrideIdentity().trim().isEmpty()
             && !opts.getOverrideIdentity().equals(id)) {
