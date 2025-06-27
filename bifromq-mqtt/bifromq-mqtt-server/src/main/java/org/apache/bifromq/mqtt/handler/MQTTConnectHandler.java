@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.mqtt.handler;
@@ -387,45 +387,90 @@ public abstract class MQTTConnectHandler extends ChannelDuplexHandler {
         if (requestClientId.isEmpty()) {
             return CompletableFuture.completedFuture(ExpireResult.NOT_FOUND);
         }
-        // detach and expire the latest version immediately
-        return inboxClient.detach(DetachRequest.newBuilder()
-                .setReqId(reqId)
-                .setInboxId(userSessionId)
-                .setExpirySeconds(0)
-                .setDiscardLWT(true)
-                .setClient(clientInfo)
-                .setNow(HLC.INST.getPhysical())
-                .build())
-            .exceptionally(e -> {
-                log.debug("Failed to expire inbox", e);
-                return DetachReply.newBuilder()
+        return AsyncRetry.exec(() -> inboxClient.exist(ExistRequest.newBuilder()
                     .setReqId(reqId)
-                    .setCode(DetachReply.Code.ERROR)
-                    .build();
-            })
-            .thenApplyAsync(reply -> {
-                switch (reply.getCode()) {
-                    case OK -> {
-                        return ExpireResult.OK;
+                    .setTenantId(clientInfo.getTenantId())
+                    .setInboxId(userSessionId)
+                    .build()),
+                (reply, t) -> {
+                    if (reply != null) {
+                        return reply.getCode() == ExistReply.Code.TRY_LATER;
                     }
+                    return false;
+                }, sessionCtx.retryTimeoutNanos / 5, sessionCtx.retryTimeoutNanos)
+            .exceptionally(unwrap(e -> {
+                if (e instanceof RetryTimeoutException) {
+                    return ExistReply.newBuilder()
+                        .setReqId(reqId)
+                        .setCode(ExistReply.Code.TRY_LATER)
+                        .build();
+                }
+                log.debug("Failed to get inbox", e);
+                return ExistReply.newBuilder()
+                    .setReqId(reqId)
+                    .setCode(ExistReply.Code.ERROR)
+                    .build();
+            }))
+            .thenComposeAsync(existReply -> {
+                switch (existReply.getCode()) {
                     case NO_INBOX -> {
-                        return ExpireResult.NOT_FOUND;
+                        return CompletableFuture.completedFuture(ExpireResult.NOT_FOUND);
+                    }
+                    case EXIST -> {
+                        // detach and expire the latest version immediately
+                        return inboxClient.detach(DetachRequest.newBuilder()
+                                .setReqId(reqId)
+                                .setInboxId(userSessionId)
+                                .setExpirySeconds(0)
+                                .setDiscardLWT(true)
+                                .setClient(clientInfo)
+                                .setNow(HLC.INST.getPhysical())
+                                .build())
+                            .exceptionally(e -> {
+                                log.debug("Failed to expire inbox", e);
+                                return DetachReply.newBuilder()
+                                    .setReqId(reqId)
+                                    .setCode(DetachReply.Code.ERROR)
+                                    .build();
+                            })
+                            .thenApplyAsync(reply -> {
+                                switch (reply.getCode()) {
+                                    case OK -> {
+                                        return ExpireResult.OK;
+                                    }
+                                    case NO_INBOX -> {
+                                        return ExpireResult.NOT_FOUND;
+                                    }
+                                    case TRY_LATER -> {
+                                        handleGoAway(
+                                            onInboxCallRetry(clientInfo, "Inbox service call[expire] needs retry"));
+                                        return ExpireResult.ERROR;
+                                    }
+                                    case BACK_PRESSURE_REJECTED -> {
+                                        handleGoAway(onInboxCallBusy(clientInfo, "Inbox service call[expire] busy"));
+                                        return ExpireResult.ERROR;
+                                    }
+                                    default -> {
+                                        handleGoAway(onInboxCallError(clientInfo, "Inbox service call[expire] error"));
+                                        return ExpireResult.ERROR;
+                                    }
+                                }
+                            }, ctx.executor());
                     }
                     case TRY_LATER -> {
-                        handleGoAway(onInboxCallRetry(clientInfo, "Inbox service call[expire] needs retry"));
-                        return ExpireResult.ERROR;
+                        handleGoAway(onInboxCallError(clientInfo, "Inbox service call[exist] needs retry"));
+                        return CompletableFuture.completedFuture(ExpireResult.ERROR);
                     }
                     case BACK_PRESSURE_REJECTED -> {
-                        handleGoAway(onInboxCallBusy(clientInfo, "Inbox service call[expire] busy"));
-                        return ExpireResult.ERROR;
+                        handleGoAway(onInboxCallError(clientInfo, "Inbox service call[exist] needs busy"));
+                        return CompletableFuture.completedFuture(ExpireResult.ERROR);
                     }
                     default -> {
-                        handleGoAway(onInboxCallError(clientInfo, "Inbox service call[expire] error"));
-                        return ExpireResult.ERROR;
+                        handleGoAway(onInboxCallError(clientInfo, "Inbox service call[exist] error"));
+                        return CompletableFuture.completedFuture(ExpireResult.ERROR);
                     }
                 }
             }, ctx.executor());
-
     }
 
     protected abstract GoAway sanityCheck(MqttConnectMessage message);
