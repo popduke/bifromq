@@ -14,14 +14,12 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.mqtt.handler;
 
 import static java.util.concurrent.CompletableFuture.allOf;
-import static org.apache.bifromq.inbox.storage.proto.RetainHandling.SEND_AT_SUBSCRIBE;
-import static org.apache.bifromq.inbox.storage.proto.RetainHandling.SEND_AT_SUBSCRIBE_IF_NOT_YET_EXISTS;
 import static org.apache.bifromq.metrics.TenantMetric.MqttConnectCount;
 import static org.apache.bifromq.metrics.TenantMetric.MqttDisconnectCount;
 import static org.apache.bifromq.metrics.TenantMetric.MqttIngressBytes;
@@ -57,6 +55,8 @@ import static org.apache.bifromq.type.MQTTClientInfoConstants.MQTT_PROTOCOL_VER_
 import static org.apache.bifromq.type.QoS.AT_LEAST_ONCE;
 import static org.apache.bifromq.type.QoS.AT_MOST_ONCE;
 import static org.apache.bifromq.type.QoS.EXACTLY_ONCE;
+import static org.apache.bifromq.type.RetainHandling.SEND_AT_SUBSCRIBE;
+import static org.apache.bifromq.type.RetainHandling.SEND_AT_SUBSCRIBE_IF_NOT_YET_EXISTS;
 import static org.apache.bifromq.util.TopicUtil.isSharedSubscription;
 import static org.apache.bifromq.util.TopicUtil.isValidTopicFilter;
 import static org.apache.bifromq.util.TopicUtil.isWildcardTopicFilter;
@@ -91,17 +91,16 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
-import lombok.Getter;
-import lombok.experimental.Accessors;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bifromq.base.util.FutureTracker;
 import org.apache.bifromq.basehlc.HLC;
 import org.apache.bifromq.dist.client.PubResult;
 import org.apache.bifromq.inbox.storage.proto.LWT;
-import org.apache.bifromq.inbox.storage.proto.TopicFilterOption;
 import org.apache.bifromq.metrics.ITenantMeter;
 import org.apache.bifromq.mqtt.handler.condition.Condition;
 import org.apache.bifromq.mqtt.handler.record.ProtocolResponse;
+import org.apache.bifromq.mqtt.handler.record.SubTask;
+import org.apache.bifromq.mqtt.handler.record.SubTasks;
 import org.apache.bifromq.mqtt.inbox.rpc.proto.SubReply;
 import org.apache.bifromq.mqtt.inbox.rpc.proto.UnsubReply;
 import org.apache.bifromq.mqtt.session.IMQTTSession;
@@ -155,6 +154,7 @@ import org.apache.bifromq.type.ClientInfo;
 import org.apache.bifromq.type.MQTTClientInfoConstants;
 import org.apache.bifromq.type.Message;
 import org.apache.bifromq.type.QoS;
+import org.apache.bifromq.type.TopicFilterOption;
 import org.apache.bifromq.type.UserProperties;
 import org.apache.bifromq.util.UTF8Util;
 
@@ -255,48 +255,44 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     @Override
     public final CompletableFuture<SubReply.Result> subscribe(long reqId, String topicFilter, QoS qos) {
         return CompletableFuture.completedFuture(true)
-            .thenComposeAsync(v -> checkAndSubscribe(reqId, topicFilter, TopicFilterOption
-                .newBuilder()
-                .setQos(qos)
-                .setIncarnation(HLC.INST.get())
-                .build(), UserProperties.getDefaultInstance())
-                .thenApply(subResult -> {
-                    switch (subResult) {
-                        case OK -> {
-                            return SubReply.Result.OK;
+            .thenComposeAsync(v -> {
+                SubTask subTask = new SubTask(topicFilter, qos, HLC.INST.get());
+                return checkAndSubscribe(reqId, subTask, UserProperties.getDefaultInstance())
+                    .thenApply(subResult -> {
+                        switch (subResult) {
+                            case OK -> {
+                                return SubReply.Result.OK;
+                            }
+                            case EXCEED_LIMIT -> {
+                                return SubReply.Result.EXCEED_LIMIT;
+                            }
+                            case NOT_AUTHORIZED -> {
+                                return SubReply.Result.NOT_AUTHORIZED;
+                            }
+                            case TOPIC_FILTER_INVALID -> {
+                                return SubReply.Result.TOPIC_FILTER_INVALID;
+                            }
+                            case WILDCARD_NOT_SUPPORTED -> {
+                                return SubReply.Result.WILDCARD_NOT_SUPPORTED;
+                            }
+                            case SHARED_SUBSCRIPTION_NOT_SUPPORTED -> {
+                                return SubReply.Result.SHARED_SUBSCRIPTION_NOT_SUPPORTED;
+                            }
+                            case SUBSCRIPTION_IDENTIFIER_NOT_SUPPORTED -> {
+                                return SubReply.Result.SUBSCRIPTION_IDENTIFIER_NOT_SUPPORTED;
+                            }
+                            case BACK_PRESSURE_REJECTED -> {
+                                return SubReply.Result.BACK_PRESSURE_REJECTED;
+                            }
+                            case TRY_LATER -> {
+                                return SubReply.Result.TRY_LATER;
+                            }
+                            default -> {
+                                return SubReply.Result.ERROR;
+                            }
                         }
-                        case EXISTS -> {
-                            return SubReply.Result.ERROR;
-                        }
-                        case EXCEED_LIMIT -> {
-                            return SubReply.Result.EXCEED_LIMIT;
-                        }
-                        case NOT_AUTHORIZED -> {
-                            return SubReply.Result.NOT_AUTHORIZED;
-                        }
-                        case TOPIC_FILTER_INVALID -> {
-                            return SubReply.Result.TOPIC_FILTER_INVALID;
-                        }
-                        case WILDCARD_NOT_SUPPORTED -> {
-                            return SubReply.Result.WILDCARD_NOT_SUPPORTED;
-                        }
-                        case SHARED_SUBSCRIPTION_NOT_SUPPORTED -> {
-                            return SubReply.Result.SHARED_SUBSCRIPTION_NOT_SUPPORTED;
-                        }
-                        case SUBSCRIPTION_IDENTIFIER_NOT_SUPPORTED -> {
-                            return SubReply.Result.SUBSCRIPTION_IDENTIFIER_NOT_SUPPORTED;
-                        }
-                        case BACK_PRESSURE_REJECTED -> {
-                            return SubReply.Result.BACK_PRESSURE_REJECTED;
-                        }
-                        case TRY_LATER -> {
-                            return SubReply.Result.TRY_LATER;
-                        }
-                        default -> {
-                            return SubReply.Result.ERROR;
-                        }
-                    }
-                }), ctx.executor());
+                    });
+            }, ctx.executor());
     }
 
     @Override
@@ -521,8 +517,10 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     }
 
     private CompletableFuture<ProtocolResponse> doSubscribe(long reqId, MqttSubscribeMessage message) {
-        List<CompletableFuture<IMQTTProtocolHelper.SubResult>> resultFutures = helper().getSubTask(message).stream()
-            .map(subTask -> checkAndSubscribe(reqId, subTask.topicFilter(), subTask.option(), subTask.userProperties()))
+        SubTasks subTasks = helper().getSubTask(message);
+        List<CompletableFuture<IMQTTProtocolHelper.SubResult>> resultFutures = subTasks.tasks()
+            .stream()
+            .map(subTask -> checkAndSubscribe(reqId, subTask, subTasks.userProperties()))
             .toList();
         return CompletableFuture.allOf(resultFutures.toArray(CompletableFuture[]::new))
             .thenApplyAsync(v -> {
@@ -536,9 +534,9 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     }
 
     protected final CompletableFuture<IMQTTProtocolHelper.SubResult> checkAndSubscribe(long reqId,
-                                                                                       String topicFilter,
-                                                                                       TopicFilterOption option,
+                                                                                       SubTask subTask,
                                                                                        UserProperties userProps) {
+        String topicFilter = subTask.topicFilter();
         if (!UTF8Util.isWellFormed(topicFilter, SANITY_CHECK)) {
             eventCollector.report(getLocal(MalformedTopicFilter.class)
                 .topicFilter(topicFilter)
@@ -563,7 +561,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         }
 
         return addFgTask(
-            authProvider.checkPermission(clientInfo, buildSubAction(topicFilter, option.getQos(), userProps))
+            authProvider.checkPermission(clientInfo, buildSubAction(topicFilter, subTask.subQoS(), userProps))
                 .thenCompose(checkResult -> {
                     assert ctx.executor().inEventLoop();
                     if (checkResult.hasGranted()) {
@@ -574,17 +572,27 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                                 .clientInfo(clientInfo));
                             return CompletableFuture.completedFuture(IMQTTProtocolHelper.SubResult.EXCEED_LIMIT);
                         }
+                        UserProperties grantedUserProps = checkResult.getGranted().getUserProps();
+                        TopicFilterOption.Builder optionBuilder = TopicFilterOption.newBuilder()
+                            .setQos(subTask.subQoS())
+                            .setRetainAsPublished(subTask.retainAsPublished())
+                            .setNoLocal(subTask.noLocal())
+                            .setRetainHandling(subTask.retainHandling())
+                            .setIncarnation(subTask.incarnation())
+                            .setUserProperties(grantedUserProps);
+                        subTask.subId().ifPresent(optionBuilder::setSubId);
+                        TopicFilterOption tfOption = optionBuilder.build();
                         Timer.Sample start = Timer.start();
-                        return addFgTask(subTopicFilter(reqId, topicFilter, option))
+                        return addFgTask(subTopicFilter(reqId, topicFilter, tfOption))
                             .thenComposeAsync(subResult -> {
                                 switch (subResult) {
                                     case OK, EXISTS -> {
                                         start.stop(tenantMeter.timer(MqttTransientSubLatency));
                                         if (!isSharedSubscription(topicFilter) && settings.retainEnabled
-                                            && (option.getRetainHandling() == SEND_AT_SUBSCRIBE
+                                            && (tfOption.getRetainHandling() == SEND_AT_SUBSCRIBE
                                             || (subResult == IMQTTProtocolHelper.SubResult.OK
                                             &&
-                                            option.getRetainHandling() == SEND_AT_SUBSCRIBE_IF_NOT_YET_EXISTS))) {
+                                            tfOption.getRetainHandling() == SEND_AT_SUBSCRIBE_IF_NOT_YET_EXISTS))) {
                                             if (!resourceThrottler.hasResource(clientInfo.getTenantId(),
                                                 TotalRetainMatchPerSeconds)) {
                                                 eventCollector.report(getLocal(OutOfTenantResource.class)
@@ -599,7 +607,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                                                     .clientInfo(clientInfo));
                                                 return CompletableFuture.completedFuture(EXCEED_LIMIT);
                                             }
-                                            return addFgTask(matchRetainedMessage(reqId, topicFilter, option))
+                                            return addFgTask(matchRetainedMessage(reqId, topicFilter, tfOption))
                                                 .thenApply(matchReply -> {
                                                     switch (matchReply.getResult()) {
                                                         case OK -> {
@@ -648,7 +656,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                     } else {
                         eventCollector.report(getLocal(SubActionDisallow.class)
                             .topicFilter(topicFilter)
-                            .qos(option.getQos())
+                            .qos(subTask.subQoS())
                             .clientInfo(clientInfo));
                         return CompletableFuture.completedFuture(IMQTTProtocolHelper.SubResult.NOT_AUTHORIZED);
                     }
@@ -747,7 +755,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     private void handlePubAckMsg(MqttPubAckMessage mqttMessage) {
         int packetId = mqttMessage.variableHeader().messageId();
         if (isConfirming(packetId)) {
-            SubMessage confirmed = confirm(packetId, true);
+            RoutedMessage confirmed = confirm(packetId, true);
             tenantMeter.recordSummary(MqttQoS1DeliverBytes, confirmed.message().getPayload().size());
         } else {
             log.trace("No packetId to confirm released: sessionId={}, packetId={}",
@@ -761,7 +769,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             if (helper().isQoS2Received(message)) {
                 handleProtocolResponse(helper().respondPubRecMsg(message, false));
                 if (settings.debugMode) {
-                    SubMessage received = getConfirming(packetId);
+                    RoutedMessage received = getConfirming(packetId);
                     eventCollector.report(getLocal(QoS2Received.class)
                         .reqId(packetId)
                         .messageId(packetId)
@@ -784,7 +792,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         MqttMessageIdVariableHeader variableHeader = (MqttMessageIdVariableHeader) message.variableHeader();
         int packetId = variableHeader.messageId();
         if (isConfirming(packetId)) {
-            SubMessage confirmed = confirm(packetId, true);
+            RoutedMessage confirmed = confirm(packetId, true);
             if (settings.debugMode) {
                 eventCollector.report(getLocal(QoS2Confirmed.class)
                     .reqId(confirmed.message().getMessageId())
@@ -797,7 +805,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                     .size(confirmed.message().getPayload().size())
                     .clientInfo(clientInfo));
             }
-            tenantMeter.recordSummary(MqttQoS2DeliverBytes, confirmed.message.getPayload().size());
+            tenantMeter.recordSummary(MqttQoS2DeliverBytes, confirmed.message().getPayload().size());
         } else {
             log.trace("No packetId to confirm released: sessionId={}, packetId={}",
                 userSessionId(clientInfo), packetId);
@@ -812,7 +820,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         return unconfirmedPacketIds.containsKey(packetId);
     }
 
-    private SubMessage getConfirming(int packetId) {
+    private RoutedMessage getConfirming(int packetId) {
         return unconfirmedPacketIds.get(packetId).message;
     }
 
@@ -820,9 +828,9 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         return clientReceiveMaximum() - unconfirmedPacketIds.size();
     }
 
-    private SubMessage confirm(int packetId, boolean delivered) {
+    private RoutedMessage confirm(int packetId, boolean delivered) {
         ConfirmingMessage confirmingMsg = unconfirmedPacketIds.get(packetId);
-        SubMessage msg = null;
+        RoutedMessage msg = null;
         if (confirmingMsg != null) {
             msg = confirmingMsg.message;
             confirm(confirmingMsg, delivered);
@@ -842,7 +850,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             confirmingMsg = unconfirmedPacketIds.get(packetId);
             if (confirmingMsg.acked) {
                 packetIdItr.remove();
-                SubMessage confirmed = confirmingMsg.message;
+                RoutedMessage confirmed = confirmingMsg.message;
                 onConfirm(confirmingMsg.seq);
                 switch (confirmed.qos()) {
                     case AT_LEAST_ONCE -> {
@@ -896,7 +904,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
 
     protected abstract void onConfirm(long seq);
 
-    protected final void sendQoS0SubMessage(SubMessage msg) {
+    protected final void sendQoS0SubMessage(RoutedMessage msg) {
         assert msg.qos() == AT_MOST_ONCE;
         ClientInfo publisher = msg.publisher();
         String topicFilter = msg.topicFilter();
@@ -908,7 +916,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                 .reason(DropReason.NoSubPermission)
                 .isRetain(msg.isRetain())
                 .sender(publisher)
-                .topic(msg.topic)
+                .topic(msg.topic())
                 .matchedFilter(topicFilter)
                 .size(msgSize)
                 .clientInfo(clientInfo()));
@@ -916,12 +924,12 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             addBgTask(unsubTopicFilter(System.nanoTime(), topicFilter));
             return;
         }
-        if (msg.isDup) {
+        if (msg.isDup()) {
             eventCollector.report(getLocal(QoS0Dropped.class)
                 .reason(DropReason.Duplicated)
                 .isRetain(msg.isRetain())
                 .sender(publisher)
-                .topic(msg.topic)
+                .topic(msg.topic())
                 .matchedFilter(topicFilter)
                 .size(msgSize)
                 .clientInfo(clientInfo()));
@@ -935,7 +943,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                     .reason(DropReason.NoLocal)
                     .isRetain(msg.isRetain())
                     .sender(publisher)
-                    .topic(msg.topic)
+                    .topic(msg.topic())
                     .matchedFilter(topicFilter)
                     .size(msgSize)
                     .clientInfo(clientInfo()));
@@ -950,7 +958,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                     .reason(DropReason.Expired)
                     .isRetain(msg.isRetain())
                     .sender(publisher)
-                    .topic(msg.topic)
+                    .topic(msg.topic())
                     .matchedFilter(topicFilter)
                     .size(msgSize)
                     .clientInfo(clientInfo()));
@@ -962,7 +970,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                 .reason(DropReason.ResourceExhausted)
                 .isRetain(msg.isRetain())
                 .sender(publisher)
-                .topic(msg.topic)
+                .topic(msg.topic())
                 .matchedFilter(topicFilter)
                 .size(msgSize)
                 .clientInfo(clientInfo()));
@@ -973,7 +981,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                 .reason(DropReason.ChannelClosed)
                 .isRetain(msg.isRetain())
                 .sender(publisher)
-                .topic(msg.topic)
+                .topic(msg.topic())
                 .matchedFilter(topicFilter)
                 .size(msgSize)
                 .clientInfo(clientInfo()));
@@ -984,7 +992,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                 .reason(DropReason.Overflow)
                 .isRetain(msg.isRetain())
                 .sender(publisher)
-                .topic(msg.topic)
+                .topic(msg.topic())
                 .matchedFilter(topicFilter)
                 .size(msgSize)
                 .clientInfo(clientInfo()));
@@ -1000,7 +1008,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                         .isRetain(msg.isRetain())
                         .sender(publisher)
                         .matchedFilter(topicFilter)
-                        .topic(msg.topic)
+                        .topic(msg.topic())
                         .size(msgSize)
                         .clientInfo(clientInfo));
                 }
@@ -1010,7 +1018,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                     .reason(DropReason.InternalError)
                     .isRetain(msg.isRetain())
                     .sender(publisher)
-                    .topic(msg.topic)
+                    .topic(msg.topic())
                     .matchedFilter(topicFilter)
                     .size(msgSize)
                     .clientInfo(clientInfo()));
@@ -1018,7 +1026,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         });
     }
 
-    protected final void sendConfirmableSubMessage(long seq, SubMessage msg) {
+    protected final void sendConfirmableSubMessage(long seq, RoutedMessage msg) {
         assert seq > -1;
         ConfirmingMessage confirmingMessage = new ConfirmingMessage(seq, msg, sessionCtx.nanoTime());
         // make sure acktimeout moments don't conflict
@@ -1038,7 +1046,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     }
 
     private void writeConfirmableSubMessage(long seq,
-                                            SubMessage msg,
+                                            RoutedMessage msg,
                                             String topicFilter,
                                             ClientInfo publisher,
                                             boolean isDup) {
@@ -1052,7 +1060,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             addBgTask(this.unsubTopicFilter(System.nanoTime(), topicFilter));
             return;
         }
-        if (msg.isDup) {
+        if (msg.isDup()) {
             reportDropConfirmableMsgEvent(msg, DropReason.Duplicated);
             ctx.executor().execute(() -> confirm(packetId, false));
             return;
@@ -1147,7 +1155,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         });
     }
 
-    private void reportDropConfirmableMsgEvent(SubMessage subMsg, DropReason reason) {
+    private void reportDropConfirmableMsgEvent(RoutedMessage subMsg, DropReason reason) {
         switch (subMsg.qos()) {
             case AT_LEAST_ONCE -> eventCollector.report(getLocal(QoS1Dropped.class)
                 .reason(reason)
@@ -1231,7 +1239,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             log.trace("Checking authorization of pub qos0 action: reqId={}, sessionId={}, topic={}", reqId,
                 userSessionId(clientInfo), topic);
         }
-        Message distMessage = helper().buildDistMessage(message);
+        Message distMessage = helper().buildDistMessage(message, clientInfo);
         UserProperties userProps = helper().getUserProps(message);
         return addFgTask(checkPubPermission(topic, distMessage, userProps))
             .thenCompose(checkResult -> {
@@ -1283,7 +1291,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             log.trace("Checking authorization of pub qos1 action: reqId={}, sessionId={}, topic={}",
                 reqId, userSessionId(clientInfo), topic);
         }
-        Message distMessage = helper().buildDistMessage(message);
+        Message distMessage = helper().buildDistMessage(message, clientInfo);
         UserProperties userProps = helper().getUserProps(message);
         return addFgTask(checkPubPermission(topic, distMessage, userProps))
             .thenCompose(checkResult -> {
@@ -1343,7 +1351,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
 
         incReceivingCount();
         inUsePacketIds.add(packetId);
-        Message distMessage = helper().buildDistMessage(message);
+        Message distMessage = helper().buildDistMessage(message, clientInfo);
         UserProperties userProps = helper().getUserProps(message);
         return addFgTask(checkPubPermission(topic, distMessage, userProps))
             .thenCompose(checkResult -> {
@@ -1742,69 +1750,14 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             }, ctx.executor());
     }
 
-    @Accessors(fluent = true)
-    @Getter
-    public static class SubMessage {
-        private final String topic;
-        private final Message message;
-        private final ClientInfo publisher;
-        private final String topicFilter;
-        private final TopicFilterOption option;
-        private final int bytesSize;
-        private final boolean permissionGranted;
-        private final boolean isDup; // if duplicated because of internal retry, should be dropped before send
-        private final long inboxPos; // used in persistent session, the position in inbox
-
-        public SubMessage(String topic,
-                          Message message,
-                          ClientInfo publisher,
-                          String topicFilter,
-                          TopicFilterOption option,
-                          boolean permissionGranted,
-                          boolean isDup) {
-            this(topic, message, publisher, topicFilter, option, permissionGranted, isDup, 0);
-        }
-
-        public SubMessage(String topic,
-                          Message message,
-                          ClientInfo publisher,
-                          String topicFilter,
-                          TopicFilterOption option,
-                          boolean permissionGranted,
-                          boolean isDup,
-                          long inboxPos) {
-            this.topic = topic;
-            this.message = message;
-            this.publisher = publisher;
-            this.topicFilter = topicFilter;
-            this.option = option;
-            this.permissionGranted = permissionGranted;
-            this.isDup = isDup;
-            this.bytesSize = topic.length() + topicFilter.length() + message.getPayload().size();
-            this.inboxPos = inboxPos;
-        }
-
-        public boolean isRetain() {
-            return message.getIsRetained() || option.getRetainAsPublished() && message.getIsRetain();
-        }
-
-        public QoS qos() {
-            return QoS.forNumber(Math.min(message.getPubQoS().getNumber(), option.getQos().getNumber()));
-        }
-
-        public int estBytes() {
-            return bytesSize;
-        }
-    }
-
     private static class ConfirmingMessage {
         final long seq;
-        final SubMessage message;
+        final RoutedMessage message;
         final long timestamp; // timestamp of first sent
         int sentCount = 1;
         boolean acked = false;
 
-        private ConfirmingMessage(long seq, SubMessage message, long timestamp) {
+        private ConfirmingMessage(long seq, RoutedMessage message, long timestamp) {
             this.seq = seq;
             this.message = message;
             this.timestamp = timestamp;

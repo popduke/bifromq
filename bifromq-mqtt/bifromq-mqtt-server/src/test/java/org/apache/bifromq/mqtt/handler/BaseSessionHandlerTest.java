@@ -55,20 +55,6 @@ import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
 import static org.testng.internal.junit.ArrayAsserts.assertArrayEquals;
 
-import org.apache.bifromq.plugin.authprovider.IAuthProvider;
-import org.apache.bifromq.plugin.authprovider.type.CheckResult;
-import org.apache.bifromq.plugin.authprovider.type.Denied;
-import org.apache.bifromq.plugin.authprovider.type.Granted;
-import org.apache.bifromq.plugin.clientbalancer.IClientBalancer;
-import org.apache.bifromq.plugin.eventcollector.Event;
-import org.apache.bifromq.plugin.eventcollector.EventType;
-import org.apache.bifromq.plugin.eventcollector.IEventCollector;
-import org.apache.bifromq.plugin.settingprovider.ISettingProvider;
-import org.apache.bifromq.plugin.settingprovider.Setting;
-import org.apache.bifromq.retain.client.IRetainClient;
-import org.apache.bifromq.retain.rpc.proto.MatchReply;
-import org.apache.bifromq.retain.rpc.proto.RetainReply;
-import org.apache.bifromq.plugin.resourcethrottler.IResourceThrottler;
 import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.Timer;
@@ -81,6 +67,7 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -97,19 +84,34 @@ import org.apache.bifromq.inbox.rpc.proto.SubReply;
 import org.apache.bifromq.inbox.storage.proto.Fetched;
 import org.apache.bifromq.inbox.storage.proto.Fetched.Builder;
 import org.apache.bifromq.inbox.storage.proto.InboxMessage;
-import org.apache.bifromq.inbox.storage.proto.TopicFilterOption;
 import org.apache.bifromq.metrics.ITenantMeter;
 import org.apache.bifromq.mqtt.MockableTest;
 import org.apache.bifromq.mqtt.handler.condition.Condition;
 import org.apache.bifromq.mqtt.service.ILocalDistService;
 import org.apache.bifromq.mqtt.service.ILocalSessionRegistry;
 import org.apache.bifromq.mqtt.session.MQTTSessionContext;
+import org.apache.bifromq.mqtt.spi.IUserPropsCustomizer;
 import org.apache.bifromq.mqtt.utils.TestTicker;
+import org.apache.bifromq.plugin.authprovider.IAuthProvider;
+import org.apache.bifromq.plugin.authprovider.type.CheckResult;
+import org.apache.bifromq.plugin.authprovider.type.Denied;
+import org.apache.bifromq.plugin.authprovider.type.Granted;
+import org.apache.bifromq.plugin.clientbalancer.IClientBalancer;
+import org.apache.bifromq.plugin.eventcollector.Event;
+import org.apache.bifromq.plugin.eventcollector.EventType;
+import org.apache.bifromq.plugin.eventcollector.IEventCollector;
+import org.apache.bifromq.plugin.resourcethrottler.IResourceThrottler;
+import org.apache.bifromq.plugin.settingprovider.ISettingProvider;
+import org.apache.bifromq.plugin.settingprovider.Setting;
+import org.apache.bifromq.retain.client.IRetainClient;
+import org.apache.bifromq.retain.rpc.proto.MatchReply;
+import org.apache.bifromq.retain.rpc.proto.RetainReply;
 import org.apache.bifromq.sessiondict.client.ISessionDictClient;
 import org.apache.bifromq.sessiondict.client.ISessionRegistration;
 import org.apache.bifromq.type.ClientInfo;
 import org.apache.bifromq.type.Message;
 import org.apache.bifromq.type.QoS;
+import org.apache.bifromq.type.TopicFilterOption;
 import org.apache.bifromq.type.TopicMessage;
 import org.apache.bifromq.type.TopicMessagePack;
 import org.mockito.ArgumentCaptor;
@@ -161,6 +163,8 @@ public abstract class BaseSessionHandlerTest extends MockableTest {
     @Mock
     protected ISettingProvider settingProvider;
     @Mock
+    protected IUserPropsCustomizer userPropsCustomizer;
+    @Mock
     protected IInboxClient.IInboxReader inboxReader;
     @Mock
     protected ITenantMeter tenantMeter;
@@ -178,6 +182,10 @@ public abstract class BaseSessionHandlerTest extends MockableTest {
         when(tenantMeter.timer(any())).thenReturn(mock(Timer.class));
         when(oomCondition.meet()).thenReturn(false);
         when(clientBalancer.needRedirect(any())).thenReturn(Optional.empty());
+        when(userPropsCustomizer.inbound(anyString(), any(), any(), any(), anyLong()))
+            .thenReturn(Collections.emptyList());
+        when(userPropsCustomizer.outbound(anyString(), any(), any(), anyString(), any(), any(), anyLong()))
+            .thenReturn(Collections.emptyList());
         sessionContext = MQTTSessionContext.builder()
             .serverId(serverId)
             .ticker(testTicker)
@@ -192,6 +200,7 @@ public abstract class BaseSessionHandlerTest extends MockableTest {
             .eventCollector(eventCollector)
             .resourceThrottler(resourceThrottler)
             .settingProvider(settingProvider)
+            .userPropsCustomizer(userPropsCustomizer)
             .build();
         mockSettings();
     }

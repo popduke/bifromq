@@ -19,18 +19,8 @@
 
 package org.apache.bifromq.mqtt.handler.v5;
 
-import org.apache.bifromq.basehlc.HLC;
-import org.apache.bifromq.inbox.storage.proto.TopicFilterOption;
-import org.apache.bifromq.mqtt.handler.MQTTSessionHandler;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5AuthReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5DisconnectReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubAckReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubCompReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubRecReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubRelReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5SubAckReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5UnsubAckReasonCode;
-import org.apache.bifromq.type.UserProperties;
+import static java.util.Collections.emptyList;
+
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.protobuf.ByteString;
@@ -53,6 +43,19 @@ import io.netty.handler.codec.mqtt.MqttUnsubAckPayload;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.bifromq.basehlc.HLC;
+import org.apache.bifromq.mqtt.handler.RoutedMessage;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5AuthReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5DisconnectReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubAckReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubCompReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubRecReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubRelReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5SubAckReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5UnsubAckReasonCode;
+import org.apache.bifromq.mqtt.spi.UserProperty;
+import org.apache.bifromq.type.TopicFilterOption;
+import org.apache.bifromq.type.UserProperties;
 
 public class MQTT5MessageBuilders {
     public static AuthBuilder auth(String authMethod) {
@@ -345,10 +348,11 @@ public class MQTT5MessageBuilders {
 
     public static final class PubBuilder {
         private int packetId;
-        private MQTTSessionHandler.SubMessage message;
+        private RoutedMessage message;
         private boolean dup;
         private boolean setupAlias;
         private int topicAlias;
+        private Iterable<UserProperty> extraUserProps = emptyList();
 
         public PubBuilder packetId(int packetId) {
             this.packetId = packetId;
@@ -370,8 +374,13 @@ public class MQTT5MessageBuilders {
             return this;
         }
 
-        public PubBuilder message(MQTTSessionHandler.SubMessage message) {
+        public PubBuilder message(RoutedMessage message) {
             this.message = message;
+            return this;
+        }
+
+        public PubBuilder extraUserProps(Iterable<UserProperty> userProperties) {
+            this.extraUserProps = userProperties;
             return this;
         }
 
@@ -407,6 +416,7 @@ public class MQTT5MessageBuilders {
             if (message.message().getUserProperties().getUserPropertiesCount() > 0) {
                 propsBuilder.addUserProperties(message.message().getUserProperties());
             }
+            extraUserProps.forEach(userProp -> propsBuilder.addUserProperty(userProp.key(), userProp.value()));
             if (message.message().getExpiryInterval() < Integer.MAX_VALUE) {
                 // If absent, the Application Message does not expire
                 int leftDelayInterval = (int) Duration.ofMillis(

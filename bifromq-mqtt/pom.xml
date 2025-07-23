@@ -34,6 +34,7 @@
     <modules>
         <module>bifromq-mqtt-broker-client</module>
         <module>bifromq-mqtt-broker-rpc-definition</module>
+        <module>bifromq-mqtt-server-spi</module>
         <module>bifromq-mqtt-server</module>
     </modules>
 </project>

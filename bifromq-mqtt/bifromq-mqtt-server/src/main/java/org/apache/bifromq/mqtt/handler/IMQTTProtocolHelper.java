@@ -28,8 +28,8 @@ import io.netty.handler.codec.mqtt.MqttUnsubAckMessage;
 import io.netty.handler.codec.mqtt.MqttUnsubscribeMessage;
 import java.util.List;
 import java.util.Optional;
-import org.apache.bifromq.inbox.storage.proto.TopicFilterOption;
 import org.apache.bifromq.mqtt.handler.record.ProtocolResponse;
+import org.apache.bifromq.mqtt.handler.record.SubTasks;
 import org.apache.bifromq.plugin.authprovider.type.CheckResult;
 import org.apache.bifromq.plugin.resourcethrottler.TenantResourceType;
 import org.apache.bifromq.retain.rpc.proto.RetainReply;
@@ -66,7 +66,7 @@ public interface IMQTTProtocolHelper {
 
     ProtocolResponse validateSubMessage(MqttSubscribeMessage message);
 
-    List<SubTask> getSubTask(MqttSubscribeMessage message);
+    SubTasks getSubTask(MqttSubscribeMessage message);
 
     ProtocolResponse onSubBackPressured(MqttSubscribeMessage subMessage);
 
@@ -94,7 +94,7 @@ public interface IMQTTProtocolHelper {
 
     ProtocolResponse onRedirect(boolean isPermanent, String serverReference);
 
-    MqttPublishMessage buildMqttPubMessage(int packetId, MQTTSessionHandler.SubMessage message, boolean isDup);
+    MqttPublishMessage buildMqttPubMessage(int packetId, RoutedMessage message, boolean isDup);
 
     ProtocolResponse respondReceivingMaximumExceeded(MqttPublishMessage mqttMessage);
 
@@ -104,7 +104,7 @@ public interface IMQTTProtocolHelper {
 
     String getTopic(MqttPublishMessage message);
 
-    Message buildDistMessage(MqttPublishMessage message);
+    Message buildDistMessage(MqttPublishMessage message, ClientInfo publisher);
 
     ProtocolResponse onQoS0DistDenied(String topic, Message distMessage, CheckResult result);
 
@@ -146,9 +146,6 @@ public interface IMQTTProtocolHelper {
         BACK_PRESSURE_REJECTED,
         TRY_LATER,
         ERROR
-    }
-
-    record SubTask(String topicFilter, TopicFilterOption option, UserProperties userProperties) {
     }
 
     record PubResult(org.apache.bifromq.dist.client.PubResult distResult, RetainReply.Result retainResult) {
