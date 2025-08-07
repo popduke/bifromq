@@ -37,8 +37,8 @@ import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
 public class WebSocketOnlyHandlerTest {
-    private EmbeddedChannel channel;
     private final String websocketPath = "/mqtt";
+    private EmbeddedChannel channel;
 
     @BeforeMethod
     public void setUp() {
@@ -67,10 +67,12 @@ public class WebSocketOnlyHandlerTest {
             HttpVersion.HTTP_1_1, HttpMethod.GET, "/wrongpath");
         request.headers().set(HttpHeaderNames.UPGRADE, "websocket");
 
+        assertTrue(request.refCnt() > 0);
         assertFalse(channel.writeInbound(request));
         FullHttpResponse response = channel.readOutbound();
+        assertEquals(request.refCnt(), 0);
         assertNotNull(response);
-        assertEquals(HttpResponseStatus.BAD_REQUEST, response.status());
+        assertEquals(response.status(), HttpResponseStatus.BAD_REQUEST);
     }
 
     @Test
@@ -82,7 +84,7 @@ public class WebSocketOnlyHandlerTest {
         assertFalse(channel.writeInbound(request));
         FullHttpResponse response = channel.readOutbound();
         assertNotNull(response);
-        assertEquals(HttpResponseStatus.BAD_REQUEST, response.status());
+        assertEquals(response.status(), HttpResponseStatus.BAD_REQUEST);
     }
 
     @Test

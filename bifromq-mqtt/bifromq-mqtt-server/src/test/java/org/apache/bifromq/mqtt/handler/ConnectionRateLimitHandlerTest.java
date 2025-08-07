@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.mqtt.handler;
@@ -24,15 +24,18 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
-import org.apache.bifromq.plugin.eventcollector.EventType;
-import org.apache.bifromq.plugin.eventcollector.IEventCollector;
 import com.google.common.util.concurrent.RateLimiter;
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.embedded.EmbeddedChannel;
 import java.util.concurrent.TimeUnit;
+import org.apache.bifromq.plugin.eventcollector.EventType;
+import org.apache.bifromq.plugin.eventcollector.IEventCollector;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.testng.annotations.BeforeMethod;
@@ -64,6 +67,8 @@ public class ConnectionRateLimitHandlerTest {
 
         verify(initializer).initialize(channel.pipeline());
         assertTrue(channel.isActive());
+        // After initialization, the handler should be removed
+        assertFalse(channel.pipeline().toMap().containsValue(handler));
     }
 
     @Test
@@ -77,5 +82,16 @@ public class ConnectionRateLimitHandlerTest {
         channel.runScheduledPendingTasks();
         assertFalse(channel.isActive());
         verify(eventCollector).report(argThat(e -> e.type() == EventType.CHANNEL_ERROR));
+    }
+
+    @Test
+    public void testRejectedConnectionReleasesInboundByteBuf() {
+        when(rateLimiter.tryAcquire()).thenReturn(false);
+        EmbeddedChannel channel = new EmbeddedChannel(handler);
+
+        ByteBuf buf = Unpooled.buffer();
+        assertTrue(buf.refCnt() > 0);
+        channel.writeInbound(buf);
+        assertEquals(buf.refCnt(), 0);
     }
 }

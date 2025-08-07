@@ -27,6 +27,7 @@ import io.netty.handler.codec.http.FullHttpRequest;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpResponseStatus;
+import io.netty.util.ReferenceCountUtil;
 
 /**
  * A simple handler that rejects all requests that are not WebSocket upgrade requests.
@@ -46,6 +47,7 @@ public class WebSocketOnlyHandler extends SimpleChannelInboundHandler<FullHttpRe
             !req.headers().get(HttpHeaderNames.UPGRADE, "").equalsIgnoreCase("websocket")) {
             FullHttpResponse response =
                 new DefaultFullHttpResponse(req.protocolVersion(), HttpResponseStatus.BAD_REQUEST);
+            ReferenceCountUtil.release(req);
             ctx.writeAndFlush(response).addListener(ChannelFutureListener.CLOSE);
         } else {
             // Proceed with the pipeline setup for WebSocket.
