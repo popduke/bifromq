@@ -19,20 +19,32 @@
 
 package org.apache.bifromq.dist.worker.cache;
 
-import java.util.Map;
 import java.util.Set;
+import org.apache.bifromq.dist.worker.schema.Matching;
 
 /**
- * The interface for tenant route matcher.
+ * The result of matching a topic within a boundary.
  */
-public interface ITenantRouteMatcher {
+public interface IMatchedRoutes {
     /**
-     * Match the topic within the given boundary.
+     * The persistent fanout count for the matched topic.
      *
-     * @param topics the topics to match
-     * @param maxPersistentFanoutCount the maximum number of persistent fanout matches to return
-     * @param maxGroupFanoutCount the maximum number of group fanout matches to return
-     * @return the result
+     * @return the count of persistent fanout matches
      */
-    Map<String, IMatchedRoutes> matchAll(Set<String> topics, int maxPersistentFanoutCount, int maxGroupFanoutCount);
+    int persistentFanout();
+
+    /**
+     * The count of group fanout for the matched topic.
+     *
+     * @return the count of group fanout
+     */
+    int groupFanout();
+
+    /**
+     * The matched routes.
+     *
+     * @return the matched routes.
+     */
+    Set<Matching> routes();
+
 }
