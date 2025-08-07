@@ -21,30 +21,25 @@ package org.apache.bifromq.mqtt.handler;
 
 import static org.apache.bifromq.plugin.eventcollector.ThreadLocalEventPool.getLocal;
 
-import org.apache.bifromq.plugin.eventcollector.IEventCollector;
-import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.ChannelError;
 import com.google.common.util.concurrent.RateLimiter;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
+import io.netty.util.ReferenceCountUtil;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.bifromq.plugin.eventcollector.IEventCollector;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.channelclosed.ChannelError;
 
 @Slf4j
 @ChannelHandler.Sharable
 public class ConnectionRateLimitHandler extends ChannelDuplexHandler {
-    /**
-     * Initialize the pipeline when the connection is accepted.
-     */
-    public interface ChannelPipelineInitializer {
-        void initialize(ChannelPipeline pipeline);
-    }
-
     private final RateLimiter rateLimiter;
     private final IEventCollector eventCollector;
     private final ChannelPipelineInitializer initializer;
+    private boolean accepted = false;
 
     public ConnectionRateLimitHandler(RateLimiter limiter,
                                       IEventCollector eventCollector,
@@ -57,9 +52,13 @@ public class ConnectionRateLimitHandler extends ChannelDuplexHandler {
     @Override
     public void channelActive(ChannelHandlerContext ctx) {
         if (rateLimiter.tryAcquire()) {
+            accepted = true;
             initializer.initialize(ctx.pipeline());
             ctx.fireChannelActive();
+            // Remove this handler after the connection is accepted
+            ctx.pipeline().remove(this);
         } else {
+            accepted = false;
             log.debug("Connection dropped due to exceed limit");
             eventCollector.report(getLocal(ChannelError.class)
                 .peerAddress(ChannelAttrs.socketAddress(ctx.channel()))
@@ -72,5 +71,21 @@ public class ConnectionRateLimitHandler extends ChannelDuplexHandler {
                 }
             }, ThreadLocalRandom.current().nextLong(100, 3000), TimeUnit.MILLISECONDS);
         }
+    }
+
+    @Override
+    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+        if (!accepted) {
+            ReferenceCountUtil.release(msg);
+            return;
+        }
+        ctx.fireChannelRead(msg);
+    }
+
+    /**
+     * Initialize the pipeline when the connection is accepted.
+     */
+    public interface ChannelPipelineInitializer {
+        void initialize(ChannelPipeline pipeline);
     }
 }
