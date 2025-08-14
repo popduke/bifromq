@@ -14,46 +14,37 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.plugin.eventcollector.distservice;
 
-import org.apache.bifromq.plugin.eventcollector.Event;
-import org.apache.bifromq.plugin.eventcollector.EventType;
-import org.apache.bifromq.type.QoS;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.ToString;
 import lombok.experimental.Accessors;
+import org.apache.bifromq.plugin.eventcollector.Event;
+import org.apache.bifromq.plugin.eventcollector.EventType;
 
 @Getter
 @Setter
 @Accessors(fluent = true, chain = true)
 @ToString(callSuper = true)
-public final class Subscribed extends Event<Subscribed> {
-    private long reqId;
-    private String topicFilter;
-    private QoS qos;
+public final class GroupFanoutThrottled extends Event<GroupFanoutThrottled> {
     private String tenantId;
-    private String inboxId;
-    private int subBrokerId;
-    private String delivererKey;
+    private String topic;
+    private int maxCount;
 
     @Override
     public EventType type() {
-        return EventType.SUBSCRIBED;
+        return EventType.GROUP_FANOUT_THROTTLED;
     }
 
     @Override
-    public void clone(Subscribed orig) {
+    public void clone(GroupFanoutThrottled orig) {
         super.clone(orig);
-        this.reqId = orig.reqId;
-        this.topicFilter = orig.topicFilter;
-        this.qos = orig.qos;
         this.tenantId = orig.tenantId;
-        this.inboxId = orig.inboxId;
-        this.subBrokerId = orig.subBrokerId;
-        this.delivererKey = orig.delivererKey;
+        this.topic = orig.topic;
+        this.maxCount = orig.maxCount;
     }
 }
