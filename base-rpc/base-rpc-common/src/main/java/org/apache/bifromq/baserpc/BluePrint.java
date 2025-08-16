@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.baserpc;
@@ -25,7 +25,6 @@ import static java.util.Collections.unmodifiableMap;
 
 import io.grpc.MethodDescriptor;
 import io.grpc.ServiceDescriptor;
-import io.grpc.protobuf.lite.EnhancedMarshaller;
 import java.util.ArrayList;
 import java.util.Map;
 import java.util.Set;
@@ -33,6 +32,7 @@ import java.util.function.Function;
 import lombok.AccessLevel;
 import lombok.Builder;
 import lombok.NoArgsConstructor;
+import org.apache.bifromq.baserpc.marshaller.HLCStampedMarshaller;
 
 /**
  * BluePrint is a configuration class for a service. It contains the service descriptor, method semantics, and method
@@ -40,7 +40,6 @@ import lombok.NoArgsConstructor;
 public final class BluePrint {
     private final ServiceDescriptor serviceDescriptor;
     private final Map<String, MethodSemantic> methodSemantics;
-    private final Map<String, MethodDescriptor<?, ?>> methods;
     private final Map<String, MethodDescriptor<?, ?>> wrappedMethods;
 
     private BluePrint(
@@ -50,7 +49,6 @@ public final class BluePrint {
         Map<String, MethodDescriptor<?, ?>> wrappedMethods) {
         this.serviceDescriptor = serviceDescriptor;
         this.methodSemantics = methodSemantics;
-        this.methods = methods;
         this.wrappedMethods = wrappedMethods;
         if (!serviceDescriptor.getMethods().containsAll(methods.values())) {
             throw new RuntimeException("Some method is not defined in the supplied service descriptor");
@@ -246,6 +244,18 @@ public final class BluePrint {
     }
 
     @NoArgsConstructor(access = AccessLevel.PRIVATE)
+    public static final class HRWPipelineUnaryMethod implements PipelineUnary {
+        public static HRWPipelineUnaryMethod getInstance() {
+            return new HRWPipelineUnaryMethod();
+        }
+
+        @Override
+        public BalanceMode mode() {
+            return BalanceMode.WCHBalanced;
+        }
+    }
+
+    @NoArgsConstructor(access = AccessLevel.PRIVATE)
     public static final class DDStreamingMethod implements Streaming {
         public static DDStreamingMethod getInstance() {
             return new DDStreamingMethod();
@@ -317,10 +327,8 @@ public final class BluePrint {
             this.methodSemantics.add(methodSemanticValue);
             this.methods.add(methodSemanticKey);
             this.wrappedMethods.add(methodSemanticKey.toBuilder()
-                .setRequestMarshaller(enhance((MethodDescriptor.PrototypeMarshaller<ReqT>)
-                    methodSemanticKey.getRequestMarshaller()))
-                .setResponseMarshaller(enhance((MethodDescriptor.PrototypeMarshaller<RespT>)
-                    methodSemanticKey.getResponseMarshaller()))
+                .setRequestMarshaller(enhance(methodSemanticKey.getRequestMarshaller()))
+                .setResponseMarshaller(enhance(methodSemanticKey.getResponseMarshaller()))
                 .build());
             return this;
         }
@@ -374,9 +382,8 @@ public final class BluePrint {
             return new BluePrint(serviceDescriptor, methodSemanticMap, methodsMap, wrappedMethods);
         }
 
-        private <T> MethodDescriptor.PrototypeMarshaller<T> enhance(
-            MethodDescriptor.PrototypeMarshaller<T> marshaller) {
-            return new EnhancedMarshaller<>(marshaller.getMessagePrototype());
+        private <T> MethodDescriptor.Marshaller<T> enhance(MethodDescriptor.Marshaller<T> marshaller) {
+            return new HLCStampedMarshaller<>(marshaller);
         }
     }
 }
