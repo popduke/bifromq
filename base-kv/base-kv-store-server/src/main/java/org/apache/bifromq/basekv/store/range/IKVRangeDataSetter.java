@@ -17,33 +17,12 @@
  * under the License.
  */
 
-package org.apache.bifromq.basekv.balance.command;
+package org.apache.bifromq.basekv.store.range;
 
-import java.util.Set;
-import lombok.Getter;
-import lombok.Setter;
-import lombok.experimental.SuperBuilder;
-import org.apache.bifromq.basekv.proto.KVRangeId;
-import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
+import com.google.protobuf.ByteString;
 
-@Getter
-@Setter
-@SuperBuilder
-public class MergeCommand extends RangeCommand {
+public interface IKVRangeDataSetter {
+    void put(ByteString key, ByteString value);
 
-    private KVRangeId mergeeId;
-    private Set<String> voters;
-
-    @Override
-    public CommandType type() {
-        return CommandType.MERGE;
-    }
-
-    @Override
-    public String toString() {
-        return String.format("MergeCommand{toStore=%s, kvRangeId=%s, expectedVer=%s, mergeeId=%s, voters=%s}",
-            getToStore(), KVRangeIdUtil.toString(getKvRangeId()),
-            printableVer(), KVRangeIdUtil.toString(mergeeId), voters);
-    }
-
+    void reset();
 }

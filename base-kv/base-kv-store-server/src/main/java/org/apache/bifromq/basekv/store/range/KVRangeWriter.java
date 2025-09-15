@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.basekv.store.range;
@@ -24,6 +24,8 @@ import static org.apache.bifromq.basekv.store.range.KVRangeKeys.METADATA_RANGE_B
 import static org.apache.bifromq.basekv.store.range.KVRangeKeys.METADATA_STATE_BYTES;
 import static org.apache.bifromq.basekv.store.range.KVRangeKeys.METADATA_VER_BYTES;
 
+import com.google.protobuf.ByteString;
+import java.util.Optional;
 import org.apache.bifromq.basekv.localengine.IKVSpaceWriter;
 import org.apache.bifromq.basekv.proto.Boundary;
 import org.apache.bifromq.basekv.proto.KVRangeId;
@@ -31,8 +33,6 @@ import org.apache.bifromq.basekv.proto.State;
 import org.apache.bifromq.basekv.raft.proto.ClusterConfig;
 import org.apache.bifromq.basekv.store.api.IKVWriter;
 import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
-import com.google.protobuf.ByteString;
-import java.util.Optional;
 
 public class KVRangeWriter extends AbstractKVRangeMetadataUpdatable<KVRangeWriter>
     implements IKVRangeWriter<KVRangeWriter> {
@@ -78,6 +78,11 @@ public class KVRangeWriter extends AbstractKVRangeMetadataUpdatable<KVRangeWrite
     @Override
     public void done() {
         keyRangeWriter().done();
+    }
+
+    @Override
+    public void reset() {
+        keyRangeWriter().reset();
     }
 
     @Override

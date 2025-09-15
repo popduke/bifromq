@@ -25,6 +25,12 @@ import static org.apache.bifromq.basekv.store.range.KVRangeKeys.METADATA_STATE_B
 import static org.apache.bifromq.basekv.store.range.KVRangeKeys.METADATA_VER_BYTES;
 import static org.apache.bifromq.basekv.utils.BoundaryUtil.NULL_BOUNDARY;
 
+import com.google.protobuf.ByteString;
+import io.reactivex.rxjava3.core.Observable;
+import io.reactivex.rxjava3.subjects.BehaviorSubject;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import lombok.Getter;
+import lombok.SneakyThrows;
 import org.apache.bifromq.basekv.localengine.ICPableKVSpace;
 import org.apache.bifromq.basekv.proto.Boundary;
 import org.apache.bifromq.basekv.proto.KVRangeId;
@@ -35,12 +41,6 @@ import org.apache.bifromq.basekv.store.api.IKVCloseableReader;
 import org.apache.bifromq.basekv.store.api.IKVRangeReader;
 import org.apache.bifromq.basekv.store.api.IKVReader;
 import org.apache.bifromq.basekv.store.api.IKVWriter;
-import com.google.protobuf.ByteString;
-import io.reactivex.rxjava3.core.Observable;
-import io.reactivex.rxjava3.subjects.BehaviorSubject;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import lombok.Getter;
-import lombok.SneakyThrows;
 
 public class KVRange extends AbstractKVRangeMetadata implements IKVRange {
     @Getter
@@ -154,7 +154,7 @@ public class KVRange extends AbstractKVRangeMetadata implements IKVRange {
     }
 
     @Override
-    public IKVReseter toReseter(KVRangeSnapshot snapshot) {
+    public IKVRangeResetter toReseter(KVRangeSnapshot snapshot) {
         IKVRangeWriter<?> rangeWriter = toWriter();
         IKVWriter kvWriter = rangeWriter
             .resetVer(snapshot.getVer())
@@ -164,22 +164,25 @@ public class KVRange extends AbstractKVRangeMetadata implements IKVRange {
             .clusterConfig(snapshot.getClusterConfig())
             .kvWriter();
         kvWriter.clear(boundary());
-        return new IKVReseter() {
+        return new IKVRangeResetter() {
             @Override
             public void put(ByteString key, ByteString value) {
                 kvWriter.put(key, value);
             }
 
             @Override
-            public IKVRange abort() {
-                rangeWriter.abort();
-                return KVRange.this;
+            public void reset() {
+                rangeWriter.reset();
             }
 
             @Override
-            public IKVRange done() {
+            public void abort() {
+                rangeWriter.abort();
+            }
+
+            @Override
+            public void done() {
                 rangeWriter.done();
-                return KVRange.this;
             }
         };
     }

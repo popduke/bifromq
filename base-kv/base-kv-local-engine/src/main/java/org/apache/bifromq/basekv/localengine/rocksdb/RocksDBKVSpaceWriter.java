@@ -19,9 +19,13 @@
 
 package org.apache.bifromq.basekv.localengine.rocksdb;
 
-import static org.apache.bifromq.basekv.localengine.rocksdb.Keys.toMetaKey;
 import static com.google.protobuf.UnsafeByteOperations.unsafeWrap;
+import static org.apache.bifromq.basekv.localengine.rocksdb.Keys.toMetaKey;
 
+import com.google.protobuf.ByteString;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Consumer;
 import org.apache.bifromq.basekv.localengine.IKVSpaceIterator;
 import org.apache.bifromq.basekv.localengine.IKVSpaceMetadataWriter;
 import org.apache.bifromq.basekv.localengine.IKVSpaceWriter;
@@ -29,10 +33,6 @@ import org.apache.bifromq.basekv.localengine.ISyncContext;
 import org.apache.bifromq.basekv.localengine.KVEngineException;
 import org.apache.bifromq.basekv.localengine.metrics.KVSpaceOpMeters;
 import org.apache.bifromq.basekv.proto.Boundary;
-import com.google.protobuf.ByteString;
-import java.util.Map;
-import java.util.Optional;
-import java.util.function.Consumer;
 import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -185,6 +185,11 @@ class RocksDBKVSpaceWriter<E extends RocksDBKVEngine<E, T, C>, T extends
                 throw new KVEngineException("Batch commit failed", e);
             }
         });
+    }
+
+    @Override
+    public void reset() {
+        helper.reset();
     }
 
     @Override

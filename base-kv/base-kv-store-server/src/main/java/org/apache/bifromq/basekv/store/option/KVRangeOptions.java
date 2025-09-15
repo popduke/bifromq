@@ -19,7 +19,6 @@
 
 package org.apache.bifromq.basekv.store.option;
 
-import org.apache.bifromq.basekv.raft.RaftConfig;
 import lombok.AccessLevel;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -27,6 +26,7 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.experimental.Accessors;
+import org.apache.bifromq.basekv.raft.RaftConfig;
 
 @Accessors(chain = true)
 @Getter
@@ -53,6 +53,8 @@ public class KVRangeOptions {
     private int statsCollectIntervalSec = 5;
     @Builder.Default
     private int zombieTimeoutSec = 60; // 1min
+    @Builder.Default
+    private int mergeTimeoutSec = 60; // 1min
     @Builder.Default
     private RaftConfig walRaftConfig = new RaftConfig()
         .setPreVote(true)

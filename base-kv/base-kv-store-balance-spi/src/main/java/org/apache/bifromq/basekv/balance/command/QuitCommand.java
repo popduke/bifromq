@@ -19,31 +19,24 @@
 
 package org.apache.bifromq.basekv.balance.command;
 
-import java.util.Set;
 import lombok.Getter;
 import lombok.Setter;
 import lombok.experimental.SuperBuilder;
-import org.apache.bifromq.basekv.proto.KVRangeId;
 import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
 
 @Getter
 @Setter
 @SuperBuilder
-public class MergeCommand extends RangeCommand {
-
-    private KVRangeId mergeeId;
-    private Set<String> voters;
+public class QuitCommand extends BalanceCommand {
 
     @Override
     public CommandType type() {
-        return CommandType.MERGE;
+        return CommandType.QUIT;
     }
 
     @Override
     public String toString() {
-        return String.format("MergeCommand{toStore=%s, kvRangeId=%s, expectedVer=%s, mergeeId=%s, voters=%s}",
-            getToStore(), KVRangeIdUtil.toString(getKvRangeId()),
-            printableVer(), KVRangeIdUtil.toString(mergeeId), voters);
+        return String.format("QuitCommand{toStore=%s, kvRangeId=%s}",
+            getToStore(), KVRangeIdUtil.toString(getKvRangeId()));
     }
-
 }

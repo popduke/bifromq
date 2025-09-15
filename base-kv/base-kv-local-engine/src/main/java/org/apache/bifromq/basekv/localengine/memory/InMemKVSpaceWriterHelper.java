@@ -19,8 +19,6 @@
 
 package org.apache.bifromq.basekv.localengine.memory;
 
-import org.apache.bifromq.basekv.localengine.ISyncContext;
-import org.apache.bifromq.basekv.proto.Boundary;
 import com.google.protobuf.ByteString;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -32,6 +30,8 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import org.apache.bifromq.basekv.localengine.ISyncContext;
+import org.apache.bifromq.basekv.proto.Boundary;
 
 class InMemKVSpaceWriterHelper {
     private final Map<String, Map<ByteString, ByteString>> metadataMap;
@@ -98,6 +98,10 @@ class InMemKVSpaceWriterHelper {
         for (String rangeId : afterWriteCallbacks.keySet()) {
             afterWriteCallbacks.get(rangeId).accept(metadataChanges.get(rangeId));
         }
+    }
+
+    void reset() {
+        rangeDataMap.clear();
     }
 
     void abort() {

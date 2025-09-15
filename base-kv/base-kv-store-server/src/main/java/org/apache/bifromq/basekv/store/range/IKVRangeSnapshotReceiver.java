@@ -14,17 +14,18 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.basekv.store.range;
 
-import com.google.protobuf.ByteString;
+import java.util.concurrent.CompletableFuture;
 
-public interface IKVReseter {
-    void put(ByteString key, ByteString value);
+public interface IKVRangeSnapshotReceiver {
 
-    IKVRange abort();
+    CompletableFuture<Result> start(IKVRangeDataSetter dataSetter);
 
-    IKVRange done();
+    enum Result {
+        TIME_OUT, NOT_FOUND, ERROR, DONE
+    }
 }

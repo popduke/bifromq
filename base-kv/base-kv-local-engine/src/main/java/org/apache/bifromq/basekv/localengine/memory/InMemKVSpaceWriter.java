@@ -19,6 +19,10 @@
 
 package org.apache.bifromq.basekv.localengine.memory;
 
+import com.google.protobuf.ByteString;
+import java.util.Map;
+import java.util.concurrent.ConcurrentSkipListMap;
+import java.util.function.Consumer;
 import org.apache.bifromq.basekv.localengine.IKVSpaceIterator;
 import org.apache.bifromq.basekv.localengine.IKVSpaceMetadataWriter;
 import org.apache.bifromq.basekv.localengine.IKVSpaceWriter;
@@ -26,10 +30,6 @@ import org.apache.bifromq.basekv.localengine.ISyncContext;
 import org.apache.bifromq.basekv.localengine.KVEngineException;
 import org.apache.bifromq.basekv.localengine.metrics.KVSpaceOpMeters;
 import org.apache.bifromq.basekv.proto.Boundary;
-import com.google.protobuf.ByteString;
-import java.util.Map;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.function.Consumer;
 import org.slf4j.Logger;
 
 class InMemKVSpaceWriter<E extends InMemKVEngine<E, T>, T extends InMemKVSpace<E, T>> extends InMemKVSpaceReader
@@ -155,6 +155,11 @@ class InMemKVSpaceWriter<E extends InMemKVEngine<E, T>, T extends InMemKVSpace<E
                 throw new KVEngineException("Batch commit failed", e);
             }
         });
+    }
+
+    @Override
+    public void reset() {
+        helper.reset();
     }
 
     @Override

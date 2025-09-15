@@ -14,15 +14,29 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.basekv.raft;
 
 import static org.apache.bifromq.base.util.CompletableFutureUtil.unwrap;
+import static org.apache.bifromq.basekv.raft.RaftConfigChanger.State.FallbackConfigCommitting;
 import static org.apache.bifromq.basekv.raft.RaftConfigChanger.State.JointConfigCommitting;
 import static org.apache.bifromq.basekv.raft.RaftConfigChanger.State.TargetConfigCommitting;
 
+import com.google.protobuf.ByteString;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.stream.Collectors;
 import org.apache.bifromq.basekv.raft.exception.ClusterConfigChangeException;
 import org.apache.bifromq.basekv.raft.exception.DropProposalException;
 import org.apache.bifromq.basekv.raft.exception.LeaderTransferException;
@@ -43,19 +57,6 @@ import org.apache.bifromq.basekv.raft.proto.RequestReadIndex;
 import org.apache.bifromq.basekv.raft.proto.RequestReadIndexReply;
 import org.apache.bifromq.basekv.raft.proto.Snapshot;
 import org.apache.bifromq.basekv.raft.proto.TimeoutNow;
-import com.google.protobuf.ByteString;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.Set;
-import java.util.concurrent.CompletableFuture;
-import java.util.stream.Collectors;
 
 class RaftNodeStateLeader extends RaftNodeState {
     private final QuorumTracker activityTracker;
@@ -156,10 +157,11 @@ class RaftNodeStateLeader extends RaftNodeState {
         peerLogTracker.tick();
         if (configChanger.tick(currentTerm())) {
             // there is a state change after tick
-            if (configChanger.state() == JointConfigCommitting || configChanger.state() == TargetConfigCommitting) {
-                log.debug("{} cluster config is activated in current term",
-                    configChanger.state() == JointConfigCommitting ? "Joint" : "Target");
+            if (configChanger.state() == JointConfigCommitting
+                || configChanger.state() == TargetConfigCommitting
+                || configChanger.state() == FallbackConfigCommitting) {
                 ClusterConfig clusterConfig = stateStorage.latestClusterConfig();
+                log.debug("Activate config in current term: {}", clusterConfig);
                 activityTracker.refresh(clusterConfig);
                 electionElapsedTick = 0; // to prevent leader from quorum check failed prematurely
                 if (leaderTransferTask != null) {
@@ -719,6 +721,9 @@ class RaftNodeStateLeader extends RaftNodeState {
                         leaderTransferTask.abort(LeaderTransferException.notFoundOrQualified());
                         leaderTransferTask = null;
                     }
+                }
+                case FallbackConfigCommitting -> {
+                    // do nothing when fallback config is committed
                 }
                 default -> {
                     // do nothing
