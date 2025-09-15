@@ -38,33 +38,39 @@ public class Formatter {
     }
 
     public static Supplier<String> toPrintable(Replica replica) {
-        return () -> replica.getUri() + "-" + BaseEncoding.base32().encode(replica.getId().toByteArray());
+        return () -> replica.getUri() + "-" + replica.hashCode();
     }
 
-    public static String toPrintable(DeltaMessage delta) {
-        try {
-            return JsonFormat.printer().print(delta);
-        } catch (Exception e) {
-            // ignore
-            return delta.toString();
-        }
+    public static Supplier<String> toPrintable(DeltaMessage delta) {
+        return () -> {
+            try {
+                return JsonFormat.printer().print(delta);
+            } catch (Exception e) {
+                // ignore
+                return delta.toString();
+            }
+        };
     }
 
-    public static String toPrintable(AckMessage ack) {
-        try {
-            return JsonFormat.printer().print(ack);
-        } catch (Exception e) {
-            // ignore
-            return ack.toString();
-        }
+    public static Supplier<String> toPrintable(AckMessage ack) {
+        return () -> {
+            try {
+                return JsonFormat.printer().print(ack);
+            } catch (Exception e) {
+                // ignore
+                return ack.toString();
+            }
+        };
     }
 
-    public static String toPrintable(CRDTStoreMessage ack) {
-        try {
-            return JsonFormat.printer().print(ack);
-        } catch (Exception e) {
-            // ignore
-            return ack.toString();
-        }
+    public static Supplier<String> toPrintable(CRDTStoreMessage ack) {
+        return () -> {
+            try {
+                return JsonFormat.printer().print(ack);
+            } catch (Exception e) {
+                // ignore
+                return ack.toString();
+            }
+        };
     }
 }

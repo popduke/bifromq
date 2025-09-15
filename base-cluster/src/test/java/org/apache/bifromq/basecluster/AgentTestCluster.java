@@ -14,17 +14,11 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.basecluster;
 
-import org.apache.bifromq.basecluster.agent.proto.AgentMemberAddr;
-import org.apache.bifromq.basecluster.agent.proto.AgentMemberMetadata;
-import org.apache.bifromq.basecluster.memberlist.HostAddressResolver;
-import org.apache.bifromq.basecluster.memberlist.agent.IAgent;
-import org.apache.bifromq.basecluster.membership.proto.HostEndpoint;
-import org.apache.bifromq.basecluster.transport.ITransport;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
@@ -40,30 +34,31 @@ import java.util.Map;
 import java.util.Set;
 import lombok.AllArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.bifromq.basecluster.agent.proto.AgentMemberAddr;
+import org.apache.bifromq.basecluster.agent.proto.AgentMemberMetadata;
+import org.apache.bifromq.basecluster.memberlist.HostAddressResolver;
+import org.apache.bifromq.basecluster.memberlist.agent.IAgent;
+import org.apache.bifromq.basecluster.membership.proto.HostEndpoint;
+import org.apache.bifromq.basecluster.transport.ITransport;
 
 @Slf4j
 public class AgentTestCluster {
-    @AllArgsConstructor
-    private static class AgentHostMeta {
-        final AgentHostOptions options;
-    }
-
     private final MockNetwork network = new MockNetwork();
     private final Map<String, AgentHostMeta> hostMetaMap = Maps.newConcurrentMap();
     private final Map<String, HostEndpoint> hostEndpointMap = Maps.newConcurrentMap();
     private final Map<String, ITransport> hostTransportMap = Maps.newConcurrentMap();
     private final Map<HostEndpoint, IAgentHost> hostMap = Maps.newConcurrentMap();
     private final Map<String, List<ByteString>> inflationLogs = Maps.newConcurrentMap();
+    private final Map<String, HostEndpoint> crashedHostEndpointMap = Maps.newConcurrentMap();
+    private final Map<String, ITransport> crashedHostTransportMap = Maps.newConcurrentMap();
+    private final Map<HostEndpoint, IAgentHost> crashedHostMap = Maps.newConcurrentMap();
     private final CompositeDisposable disposables = new CompositeDisposable();
 
     public AgentTestCluster() {
     }
 
-    public String newHost(String hostId, AgentHostOptions options) {
-        hostMetaMap.computeIfAbsent(hostId, k -> {
-            loadStore(hostId, options);
-            return new AgentHostMeta(options);
-        });
+    public String registerHost(String hostId, AgentHostOptions options) {
+        hostMetaMap.computeIfAbsent(hostId, k -> new AgentHostMeta(options));
         return hostId;
     }
 
@@ -94,10 +89,23 @@ public class AgentTestCluster {
         network.isolate(hostTransportMap.get(hostId));
     }
 
+    public void crash(String hostId) {
+        checkHost(hostId);
+        network.isolate(hostTransportMap.get(hostId));
+        inflationLogs.remove(hostId);
+
+        HostEndpoint crashedEndpoint = hostEndpointMap.remove(hostId);
+        crashedHostEndpointMap.put(hostId, crashedEndpoint);
+
+        IAgentHost crashedAgentHost = hostMap.remove(crashedEndpoint);
+        crashedHostMap.put(crashedEndpoint, crashedAgentHost);
+        ITransport transport = hostTransportMap.remove(hostId);
+        crashedHostTransportMap.put(hostId, transport);
+    }
+
     public void integrate(String hostId) {
         network.integrate(hostTransportMap.get(hostId));
     }
-
 
     public HostEndpoint endpoint(String hostId) {
         checkHost(hostId);
@@ -145,6 +153,8 @@ public class AgentTestCluster {
     public void shutdown() {
         disposables.dispose();
         hostEndpointMap.keySet().forEach(this::stopHost);
+        crashedHostTransportMap.keySet().forEach(hostId ->
+            crashedHostMap.remove(crashedHostEndpointMap.get(hostId)).close());
     }
 
     public IAgentHost getHost(String hostId) {
@@ -154,5 +164,10 @@ public class AgentTestCluster {
 
     private void checkHost(String hostId) {
         Preconditions.checkArgument(hostEndpointMap.containsKey(hostId));
+    }
+
+    @AllArgsConstructor
+    private static class AgentHostMeta {
+        final AgentHostOptions options;
     }
 }

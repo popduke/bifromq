@@ -31,6 +31,7 @@ import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -120,7 +121,7 @@ public class KVStoreBalanceController {
         this.customBalancerFactories = Lists.newArrayList(factories);
         this.builtinBalancerFactories = Lists.newArrayList(
             new RangeBootstrapBalancerFactory(bootstrapDelay),
-            new RedundantRangeRemovalBalancerFactory(),
+            new RedundantRangeRemovalBalancerFactory(zombieProbeDelay),
             new UnreachableReplicaRemovalBalancerFactory(zombieProbeDelay));
         this.statesProposal = metaService.balancerStatesProposal(storeClient.clusterId());
         this.balancers = new HashMap<>();
@@ -137,7 +138,8 @@ public class KVStoreBalanceController {
         if (state.compareAndSet(State.Init, State.Started)) {
             this.localStoreId = localStoreId;
             statesReporter = metaService.balancerStatesReporter(storeClient.clusterId(), localStoreId);
-            log = MDCLogger.getLogger("balancer.logger", "clusterId", storeClient.clusterId(), "storeId", localStoreId);
+            log = MDCLogger.getLogger("balancer.logger",
+                "clusterId", storeClient.clusterId(), "storeId", localStoreId, "balancer", "CONTROLLER");
 
             for (IStoreBalancerFactory factory : builtinBalancerFactories) {
                 StoreBalancer balancer = factory.newBalancer(storeClient.clusterId(), localStoreId);
@@ -146,12 +148,12 @@ public class KVStoreBalanceController {
             }
             for (IStoreBalancerFactory factory : customBalancerFactories) {
                 String balancerFactoryFQN = factory.getClass().getName();
-                log.info("Create balancer from factory: {}", balancerFactoryFQN);
                 StoreBalancer balancer = factory.newBalancer(storeClient.clusterId(), localStoreId);
+                log.info("Create balancer[{}] from factory: {}", balancer.getClass().getName(), balancerFactoryFQN);
                 if (balancer instanceof RangeBootstrapBalancer
                     || balancer instanceof RedundantRangeRemovalBalancer
                     || balancer instanceof UnreachableReplicaRemovalBalancer) {
-                    log.warn("{} should not be created from custom balancer factory",
+                    log.warn("Builtin balancer[{}] should not be created from custom balancer factory",
                         balancer.getClass().getSimpleName());
                     continue;
                 }
@@ -163,14 +165,28 @@ public class KVStoreBalanceController {
             log.info("BalancerController start");
             disposables.add(statesProposal.expectedBalancerStates()
                 .subscribe(currentExpected -> {
+                    log.trace("Expected balancer states changed: {}", currentExpected);
                     this.expectedBalancerStates = currentExpected;
                     trigger();
                 }));
             disposables.add(storeClient.describe().subscribe(descriptors -> {
+                log.trace("Landscape changed: {}", descriptors);
                 this.landscape = descriptors;
                 trimRangeHistory(descriptors);
                 trigger();
             }));
+            disposables.add(statesReporter.refreshSignal()
+                .subscribe(ts -> {
+                    for (Map.Entry<String, StoreBalancerState> entry : balancers.entrySet()) {
+                        String balancerFacClassFQN = entry.getKey();
+                        StoreBalancerState balancerState = entry.getValue();
+                        if (!balancerState.isBuiltin) {
+                            log.debug("Report balancer state for {}", balancerFacClassFQN);
+                            statesReporter.reportBalancerState(balancerFacClassFQN,
+                                balancerState.disabled.get(), balancerState.loadRules.get());
+                        }
+                    }
+                }));
         }
     }
 
@@ -199,6 +215,10 @@ public class KVStoreBalanceController {
     private void trigger() {
         if (state.get() == State.Started && scheduling.compareAndSet(false, true)) {
             long jitter = ThreadLocalRandom.current().nextLong(0, retryDelay.toMillis());
+            if (task != null && !task.isDone()) {
+                log.trace("Cancel scheduled balance task");
+                task.cancel(true);
+            }
             task = executor.schedule(this::updateAndBalance, jitter, TimeUnit.MILLISECONDS);
         }
     }
@@ -208,6 +228,9 @@ public class KVStoreBalanceController {
         Set<KVRangeStoreDescriptor> landscape = this.landscape;
         if (landscape == null || landscape.isEmpty()) {
             scheduling.set(false);
+            if (!Objects.equals(this.landscape, landscape)) {
+                trigger();
+            }
             return;
         }
         for (Map.Entry<String, StoreBalancerState> entry : balancers.entrySet()) {
@@ -222,18 +245,25 @@ public class KVStoreBalanceController {
                             Struct loadRules = balancerState.loadRules.get();
                             boolean needReport = false;
                             if (balancerState.disabled.get() != disable) {
-                                log.info("Balancer[{}] is {}", balancerFacClassFQN, disable ? "disabled" : "enabled");
+                                log.info("Balancer[{}] is {}", balancerState.balancer.getClass().getSimpleName(),
+                                    disable ? "disabled" : "enabled");
                                 balancerState.disabled.set(disable);
                                 needReport = true;
                             }
-                            Struct expectedLoadRules = expectedState.getLoadRules();
-                            if (!loadRules.equals(expectedLoadRules)
-                                && balancerState.balancer.validate(expectedLoadRules)) {
-                                loadRules = expectedLoadRules;
-                                // report the balancer state
-                                balancerState.loadRules.set(expectedLoadRules);
-                                balancerState.balancer.update(expectedLoadRules);
-                                needReport = true;
+                            Struct expectedLoadRules = loadRules.toBuilder()
+                                .mergeFrom(expectedState.getLoadRules())
+                                .build();
+                            if (!loadRules.equals(expectedLoadRules)) {
+                                if (balancerState.balancer.validate(expectedLoadRules)) {
+                                    loadRules = expectedLoadRules;
+                                    // report the balancer state
+                                    balancerState.loadRules.set(expectedLoadRules);
+                                    balancerState.balancer.update(expectedLoadRules);
+                                    needReport = true;
+                                } else {
+                                    log.warn("Balancer[{}] load rules not valid: {}",
+                                        balancerState.balancer.getClass().getSimpleName(), expectedLoadRules);
+                                }
                             }
                             if (needReport) {
                                 statesReporter.reportBalancerState(balancerFacClassFQN, disable, loadRules);
@@ -245,7 +275,7 @@ public class KVStoreBalanceController {
                 }
                 balancerState.balancer.update(landscape);
             } catch (Throwable e) {
-                log.error("Balancer[{}] update failed", balancerFacClassFQN, e);
+                log.error("Balancer[{}] update failed", balancerState.balancer.getClass().getSimpleName(), e);
             }
         }
         balance(expectedBalancerState, landscape);
@@ -254,9 +284,11 @@ public class KVStoreBalanceController {
     private void scheduleRetry(Map<String, BalancerStateSnapshot> expected,
                                Set<KVRangeStoreDescriptor> landscape,
                                Duration delay) {
+        log.debug("Retry balance after {}s", delay.toSeconds());
         task = executor.schedule(() -> {
-            if (expected != this.expectedBalancerStates || landscape != this.landscape) {
+            if (!Objects.equals(expected, this.expectedBalancerStates) || landscape != this.landscape) {
                 // retry is preemptive
+                log.trace("Balance retry is preempted");
                 return;
             }
             if (scheduling.compareAndSet(false, true)) {
@@ -268,11 +300,11 @@ public class KVStoreBalanceController {
     private void balance(final Map<String, BalancerStateSnapshot> expected,
                          final Set<KVRangeStoreDescriptor> landscape) {
         metricsManager.scheduleCount.increment();
-        Duration delay = Duration.ZERO;
+        Duration delay = null;
         for (Map.Entry<String, StoreBalancerState> entry : balancers.entrySet()) {
-            String balancerFactoryName = entry.getKey();
             StoreBalancerState fromBalancerState = entry.getValue();
             StoreBalancer fromBalancer = fromBalancerState.balancer;
+            String balancerName = fromBalancer.getClass().getSimpleName();
             if (fromBalancerState.disabled.get()) {
                 continue;
             }
@@ -282,9 +314,8 @@ public class KVStoreBalanceController {
                     case BalanceNow -> {
                         BalanceCommand commandToRun = ((BalanceNow<?>) result).command;
                         if (!isStaleCommand(commandToRun)) {
-                            log.info("Balancer[{}] command run: {}", balancerFactoryName, commandToRun);
-                            String balancerName = fromBalancer.getClass().getSimpleName();
                             String cmdName = commandToRun.getClass().getSimpleName();
+                            log.info("Balancer[{}] command run: {}", balancerName, commandToRun);
                             Sample start = Timer.start();
                             runCommand(commandToRun)
                                 .whenCompleteAsync((success, e) -> {
@@ -295,7 +326,7 @@ public class KVStoreBalanceController {
                                         metrics.cmdFailedCounter.increment();
                                     } else {
                                         log.info("Balancer[{}] command run result[{}]: {}",
-                                            balancerFactoryName, success, commandToRun);
+                                            balancerName, success, commandToRun);
                                         if (success) {
                                             metrics.cmdSucceedCounter.increment();
                                             start.stop(metrics.cmdRunTimer);
@@ -305,7 +336,8 @@ public class KVStoreBalanceController {
                                     }
                                     scheduling.set(false);
                                     if (success) {
-                                        if (this.landscape != landscape || this.expectedBalancerStates != expected) {
+                                        if (!Objects.equals(this.landscape, landscape)
+                                            || !Objects.equals(this.expectedBalancerStates, expected)) {
                                             trigger();
                                         }
                                     } else {
@@ -317,21 +349,21 @@ public class KVStoreBalanceController {
                     }
                     case AwaitBalance -> {
                         Duration await = ((AwaitBalance) result).await;
-                        delay = await.toNanos() > delay.toNanos() ? await : delay;
+                        delay = delay != null ? (await.toNanos() < delay.toNanos() ? await : delay) : await;
                     }
                     default -> {
                         // do nothing
                     }
                 }
             } catch (Throwable e) {
-                log.warn("Balancer[{}] unexpected error", balancerFactoryName, e);
+                log.warn("Balancer[{}] unexpected error", balancerName, e);
             }
         }
         // no command to run
         scheduling.set(false);
-        if (this.landscape != landscape || this.expectedBalancerStates != expected) {
+        if (!Objects.equals(this.landscape, landscape) || !Objects.equals(this.expectedBalancerStates, expected)) {
             trigger();
-        } else if (!delay.isZero()) {
+        } else if (delay != null) {
             // if some balancers are in the progress of generating balance command, wait for a while
             scheduleRetry(expected, landscape, delay);
         }
