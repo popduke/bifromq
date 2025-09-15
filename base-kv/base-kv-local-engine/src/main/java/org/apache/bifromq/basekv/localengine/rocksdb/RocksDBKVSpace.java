@@ -202,10 +202,10 @@ abstract class RocksDBKVSpace<
     }
 
     private void updateMetadata(Map<ByteString, ByteString> metadataUpdates) {
+        if (metadataUpdates.isEmpty()) {
+            return;
+        }
         metadataRefresher.runIfNeeded(() -> {
-            if (metadataUpdates.isEmpty()) {
-                return;
-            }
             Map<ByteString, ByteString> metaMap = Maps.newHashMap(metadataSubject.getValue());
             metaMap.putAll(metadataUpdates);
             metadataSubject.onNext(Collections.unmodifiableMap(metaMap));
