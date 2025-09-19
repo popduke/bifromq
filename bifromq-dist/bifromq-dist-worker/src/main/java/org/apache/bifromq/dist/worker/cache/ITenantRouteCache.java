@@ -14,18 +14,17 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.dist.worker.cache;
 
-import org.apache.bifromq.basekv.proto.Boundary;
-import org.apache.bifromq.dist.worker.schema.Matching;
-import org.apache.bifromq.type.RouteMatcher;
 import java.util.List;
-import java.util.NavigableSet;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
+import org.apache.bifromq.basekv.proto.Boundary;
+import org.apache.bifromq.dist.worker.cache.task.RefreshEntriesTask;
+import org.apache.bifromq.dist.worker.schema.Matching;
 
 /**
  * Cache for matched routes for given tenant.
@@ -33,7 +32,7 @@ import java.util.concurrent.CompletableFuture;
 public interface ITenantRouteCache {
     boolean isCached(List<String> filterLevels);
 
-    void refresh(NavigableSet<RouteMatcher> routeMatchers);
+    void refresh(RefreshEntriesTask task);
 
     CompletableFuture<Set<Matching>> getMatch(String topic, Boundary currentTenantRange);
 

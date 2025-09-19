@@ -27,7 +27,7 @@ import org.apache.bifromq.type.RouteMatcher;
 /**
  * Represent a normal matching route.
  */
-@EqualsAndHashCode(callSuper = true)
+@EqualsAndHashCode(callSuper = true, cacheStrategy = EqualsAndHashCode.CacheStrategy.LAZY)
 @ToString
 public class NormalMatching extends Matching {
     private final String receiverUrl;
@@ -38,9 +38,9 @@ public class NormalMatching extends Matching {
     private final MatchInfo matchInfo;
 
     @EqualsAndHashCode.Exclude
-    private final KVSchemaUtil.Receiver receiver;
+    private final Receiver receiver;
 
-    NormalMatching(String tenantId, RouteMatcher matcher, String receiverUrl, long incarnation) {
+    public NormalMatching(String tenantId, RouteMatcher matcher, String receiverUrl, long incarnation) {
         super(tenantId, matcher);
         this.receiverUrl = receiverUrl;
         this.receiver = KVSchemaUtil.parseReceiver(receiverUrl);

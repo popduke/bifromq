@@ -26,7 +26,7 @@ import org.apache.bifromq.type.RouteMatcher;
 /**
  * The abstract class of matching route.
  */
-@EqualsAndHashCode
+@EqualsAndHashCode(cacheStrategy = EqualsAndHashCode.CacheStrategy.LAZY)
 @ToString
 public abstract class Matching {
     @EqualsAndHashCode.Exclude
