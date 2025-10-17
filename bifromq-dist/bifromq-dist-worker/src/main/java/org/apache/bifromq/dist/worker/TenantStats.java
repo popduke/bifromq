@@ -14,45 +14,61 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.dist.worker;
 
+import static org.apache.bifromq.metrics.TenantMetric.MqttRouteNumGauge;
 import static org.apache.bifromq.metrics.TenantMetric.MqttRouteSpaceGauge;
 import static org.apache.bifromq.metrics.TenantMetric.MqttSharedSubNumGauge;
 
-import org.apache.bifromq.metrics.ITenantMeter;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.Supplier;
+import org.apache.bifromq.metrics.ITenantMeter;
 
-class TenantRouteState {
+class TenantStats {
     private final LongAdder normalRoutes = new LongAdder();
     private final LongAdder sharedRoutes = new LongAdder();
     private final String tenantId;
     private final String[] tags;
+    private boolean isLeader;
 
-    TenantRouteState(String tenantId, Supplier<Number> spaceUsageProvider, String... tags) {
+    TenantStats(String tenantId, Supplier<Number> spaceUsageProvider, String... tags) {
         this.tenantId = tenantId;
         this.tags = tags;
         ITenantMeter.gauging(tenantId, MqttRouteSpaceGauge, spaceUsageProvider, tags);
-        ITenantMeter.gauging(tenantId, MqttSharedSubNumGauge, sharedRoutes::sum, tags);
     }
 
     void addNormalRoutes(int delta) {
         normalRoutes.add(delta);
+        toggleMetering(isLeader);
     }
 
     void addSharedRoutes(int delta) {
         sharedRoutes.add(delta);
+        toggleMetering(isLeader);
     }
 
     boolean isNoRoutes() {
         return normalRoutes.sum() == 0 && sharedRoutes.sum() == 0;
     }
 
+    void toggleMetering(boolean isLeader) {
+        if (!this.isLeader && isLeader) {
+            ITenantMeter.gauging(tenantId, MqttRouteNumGauge, normalRoutes::sum, tags);
+            ITenantMeter.gauging(tenantId, MqttSharedSubNumGauge, sharedRoutes::sum, tags);
+            this.isLeader = true;
+        } else if (this.isLeader && !isLeader) {
+            ITenantMeter.stopGauging(tenantId, MqttRouteNumGauge, tags);
+            ITenantMeter.stopGauging(tenantId, MqttSharedSubNumGauge, tags);
+            this.isLeader = false;
+        }
+    }
+
     void destroy() {
         ITenantMeter.stopGauging(tenantId, MqttRouteSpaceGauge, tags);
+        ITenantMeter.stopGauging(tenantId, MqttRouteNumGauge, tags);
         ITenantMeter.stopGauging(tenantId, MqttSharedSubNumGauge, tags);
     }
 }

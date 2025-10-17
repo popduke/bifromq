@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.inbox.store;
@@ -22,9 +22,5 @@ package org.apache.bifromq.inbox.store;
 import java.util.concurrent.CompletableFuture;
 
 public interface IInboxStoreGCProcessor {
-    CompletableFuture<Result> gc(long reqId, long now);
-
-    enum Result {
-        OK, ERROR
-    }
+    CompletableFuture<Void> gc(long reqId, long now);
 }

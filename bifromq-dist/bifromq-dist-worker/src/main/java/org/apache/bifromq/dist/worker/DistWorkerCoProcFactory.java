@@ -49,7 +49,6 @@ import org.apache.bifromq.plugin.resourcethrottler.IResourceThrottler;
 import org.apache.bifromq.plugin.settingprovider.ISettingProvider;
 import org.apache.bifromq.plugin.subbroker.ISubBrokerManager;
 import org.apache.bifromq.sysprops.props.DistMatchParallelism;
-import org.apache.bifromq.sysprops.props.DistWorkerFanOutSplitThreshold;
 
 @Slf4j
 public class DistWorkerCoProcFactory implements IKVRangeCoProcFactory {
@@ -62,7 +61,7 @@ public class DistWorkerCoProcFactory implements IKVRangeCoProcFactory {
     private final Duration loadEstWindow;
     private final int fanoutParallelism;
     private final int inlineFanOutThreshold;
-    private final int fanoutSplitThreshold = DistWorkerFanOutSplitThreshold.INSTANCE.get();
+    private final int fanoutSplitThreshold;
 
     public DistWorkerCoProcFactory(IDistClient distClient,
                                    IEventCollector eventCollector,
@@ -72,13 +71,15 @@ public class DistWorkerCoProcFactory implements IKVRangeCoProcFactory {
                                    ISettingProvider settingProvider,
                                    Duration loadEstimateWindow,
                                    int fanoutParallelism,
-                                   int inlineFanOutThreshold) {
+                                   int inlineFanOutThreshold,
+                                   int fanoutSplitThreshold) {
         this.eventCollector = eventCollector;
         this.resourceThrottler = resourceThrottler;
         this.loadEstWindow = loadEstimateWindow;
         this.deliverer = messageDeliverer;
         this.settingProvider = settingProvider;
         this.fanoutParallelism = fanoutParallelism;
+        this.fanoutSplitThreshold = fanoutSplitThreshold;
         this.inlineFanOutThreshold = inlineFanOutThreshold;
         subscriptionChecker = new SubscriptionCleaner(subBrokerManager, distClient);
 
@@ -111,7 +112,7 @@ public class DistWorkerCoProcFactory implements IKVRangeCoProcFactory {
                                        Supplier<IKVCloseableReader> rangeReaderProvider) {
         ISubscriptionCache routeCache = new SubscriptionCache(id, rangeReaderProvider,
             settingProvider, eventCollector, matchExecutor);
-        ITenantsState tenantsState = new TenantsState(rangeReaderProvider.get(),
+        ITenantsStats tenantsState = new TenantsStats(rangeReaderProvider,
             "clusterId", clusterId, "storeId", storeId, "rangeId", KVRangeIdUtil.toString(id));
 
         IDeliverExecutorGroup deliverExecutorGroup = new DeliverExecutorGroup(

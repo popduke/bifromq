@@ -14,67 +14,11 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.mqtt.handler.v5;
 
-
-import com.google.protobuf.ByteString;
-import io.netty.channel.Channel;
-import io.netty.channel.ChannelDuplexHandler;
-import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelPipeline;
-import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.handler.codec.mqtt.MqttDecoder;
-import io.netty.handler.codec.mqtt.MqttMessage;
-import io.netty.handler.codec.mqtt.MqttMessageBuilders;
-import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
-import io.netty.handler.codec.mqtt.MqttMessageType;
-import io.netty.handler.codec.mqtt.MqttProperties;
-import io.netty.handler.codec.mqtt.MqttPubReplyMessageVariableHeader;
-import io.netty.handler.codec.mqtt.MqttPublishMessage;
-import io.netty.handler.codec.mqtt.MqttReasonCodeAndPropertiesVariableHeader;
-import io.netty.handler.codec.mqtt.MqttSubAckMessage;
-import io.netty.handler.codec.mqtt.MqttSubscribeMessage;
-import io.netty.handler.codec.mqtt.MqttUnsubAckMessage;
-import io.netty.handler.codec.mqtt.MqttVersion;
-import io.netty.handler.traffic.ChannelTrafficShapingHandler;
-import lombok.SneakyThrows;
-import lombok.extern.slf4j.Slf4j;
-import org.apache.bifromq.basehlc.HLC;
-import org.apache.bifromq.dist.client.PubResult;
-import org.apache.bifromq.mqtt.handler.BaseSessionHandlerTest;
-import org.apache.bifromq.mqtt.handler.ChannelAttrs;
-import org.apache.bifromq.mqtt.handler.TenantSettings;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5DisconnectReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubAckReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubRecReasonCode;
-import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5SubAckReasonCode;
-import org.apache.bifromq.mqtt.session.IMQTTTransientSession;
-import org.apache.bifromq.mqtt.utils.MQTTMessageUtils;
-import org.apache.bifromq.plugin.authprovider.type.CheckResult;
-import org.apache.bifromq.plugin.authprovider.type.Granted;
-import org.apache.bifromq.plugin.authprovider.type.MQTTAction;
-import org.apache.bifromq.plugin.eventcollector.mqttbroker.clientdisconnect.ExceedReceivingLimit;
-import org.apache.bifromq.type.ClientInfo;
-import org.apache.bifromq.type.MQTTClientInfoConstants;
-import org.apache.bifromq.type.Message;
-import org.apache.bifromq.type.QoS;
-import org.apache.bifromq.type.TopicMessagePack;
-import org.mockito.ArgumentCaptor;
-import org.testng.annotations.AfterMethod;
-import org.testng.annotations.BeforeMethod;
-import org.testng.annotations.Test;
-
-import java.lang.reflect.Method;
-import java.net.InetSocketAddress;
-import java.nio.ByteBuffer;
-import java.util.Collections;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 import static io.netty.handler.codec.mqtt.MqttMessageType.DISCONNECT;
 import static io.netty.handler.codec.mqtt.MqttMessageType.PUBACK;
@@ -92,6 +36,7 @@ import static org.apache.bifromq.plugin.eventcollector.EventType.EXCEED_RECEIVIN
 import static org.apache.bifromq.plugin.eventcollector.EventType.INVALID_TOPIC;
 import static org.apache.bifromq.plugin.eventcollector.EventType.INVALID_TOPIC_FILTER;
 import static org.apache.bifromq.plugin.eventcollector.EventType.MALFORMED_TOPIC;
+import static org.apache.bifromq.plugin.eventcollector.EventType.MATCH_RETAIN_ERROR;
 import static org.apache.bifromq.plugin.eventcollector.EventType.MQTT_SESSION_START;
 import static org.apache.bifromq.plugin.eventcollector.EventType.MQTT_SESSION_STOP;
 import static org.apache.bifromq.plugin.eventcollector.EventType.MSG_RETAINED;
@@ -105,13 +50,15 @@ import static org.apache.bifromq.plugin.eventcollector.EventType.QOS0_DROPPED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS0_PUSHED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS1_CONFIRMED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS1_DIST_ERROR;
+import static org.apache.bifromq.plugin.eventcollector.EventType.QOS1_DROPPED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS1_PUSHED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_CONFIRMED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_DIST_ERROR;
+import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_DROPPED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_PUSHED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_RECEIVED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.RETAIN_MSG_CLEARED;
-import static org.apache.bifromq.plugin.eventcollector.EventType.SERVER_BUSY;
+import static org.apache.bifromq.plugin.eventcollector.EventType.RETAIN_MSG_MATCHED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.SUB_ACKED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.UNSUB_ACKED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.UNSUB_ACTION_DISALLOW;
@@ -136,6 +83,67 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertNull;
 import static org.testng.Assert.assertTrue;
+
+import com.google.protobuf.ByteString;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelDuplexHandler;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelPipeline;
+import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.codec.mqtt.MqttDecoder;
+import io.netty.handler.codec.mqtt.MqttMessage;
+import io.netty.handler.codec.mqtt.MqttMessageBuilders;
+import io.netty.handler.codec.mqtt.MqttMessageIdVariableHeader;
+import io.netty.handler.codec.mqtt.MqttMessageType;
+import io.netty.handler.codec.mqtt.MqttProperties;
+import io.netty.handler.codec.mqtt.MqttPubReplyMessageVariableHeader;
+import io.netty.handler.codec.mqtt.MqttPublishMessage;
+import io.netty.handler.codec.mqtt.MqttQoS;
+import io.netty.handler.codec.mqtt.MqttReasonCodeAndPropertiesVariableHeader;
+import io.netty.handler.codec.mqtt.MqttSubAckMessage;
+import io.netty.handler.codec.mqtt.MqttSubscribeMessage;
+import io.netty.handler.codec.mqtt.MqttSubscriptionOption;
+import io.netty.handler.codec.mqtt.MqttUnsubAckMessage;
+import io.netty.handler.codec.mqtt.MqttVersion;
+import io.netty.handler.traffic.ChannelTrafficShapingHandler;
+import java.lang.reflect.Method;
+import java.net.InetSocketAddress;
+import java.nio.ByteBuffer;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.bifromq.basehlc.HLC;
+import org.apache.bifromq.dist.client.PubResult;
+import org.apache.bifromq.mqtt.handler.BaseSessionHandlerTest;
+import org.apache.bifromq.mqtt.handler.ChannelAttrs;
+import org.apache.bifromq.mqtt.handler.TenantSettings;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5DisconnectReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubAckReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5PubRecReasonCode;
+import org.apache.bifromq.mqtt.handler.v5.reason.MQTT5SubAckReasonCode;
+import org.apache.bifromq.mqtt.session.IMQTTTransientSession;
+import org.apache.bifromq.mqtt.utils.MQTTMessageUtils;
+import org.apache.bifromq.plugin.authprovider.type.CheckResult;
+import org.apache.bifromq.plugin.authprovider.type.Granted;
+import org.apache.bifromq.plugin.authprovider.type.MQTTAction;
+import org.apache.bifromq.plugin.eventcollector.EventType;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.clientdisconnect.ExceedReceivingLimit;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.pushhandling.DropReason;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.pushhandling.QoS1Dropped;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.pushhandling.QoS2Dropped;
+import org.apache.bifromq.type.ClientInfo;
+import org.apache.bifromq.type.MQTTClientInfoConstants;
+import org.apache.bifromq.type.Message;
+import org.apache.bifromq.type.QoS;
+import org.apache.bifromq.type.TopicMessagePack;
+import org.mockito.ArgumentCaptor;
+import org.testng.annotations.AfterMethod;
+import org.testng.annotations.BeforeMethod;
+import org.testng.annotations.Test;
 
 @Slf4j
 public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
@@ -215,7 +223,9 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         channel.writeInbound(subMessage);
         MqttSubAckMessage subAckMessage = channel.readOutbound();
         verifySubAck(subAckMessage, new int[] {0, MQTT5SubAckReasonCode.TopicFilterInvalid.value(), 2});
-        verifyEvent(MQTT_SESSION_START, INVALID_TOPIC_FILTER, SUB_ACKED);
+        verifyEvent(MQTT_SESSION_START, INVALID_TOPIC_FILTER,
+            RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED,
+            SUB_ACKED);
         shouldCleanSubs = true;
     }
 
@@ -231,7 +241,7 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         channel.writeInbound(subMessage);
         MqttSubAckMessage subAckMessage = channel.readOutbound();
         verifySubAck(subAckMessage, new int[] {0, 1, 128});
-        verifyEvent(MQTT_SESSION_START, SUB_ACKED);
+        verifyEvent(MQTT_SESSION_START, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, SUB_ACKED);
         shouldCleanSubs = true;
     }
 
@@ -256,7 +266,10 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         channel.writeInbound(subMessage);
         subAckMessage = channel.readOutbound();
         verifySubAck(subAckMessage, new int[] {MQTT5SubAckReasonCode.QuotaExceeded.value()});
-        verifyEvent(MQTT_SESSION_START, SUB_ACKED, SUB_ACKED);
+        verifyEvent(MQTT_SESSION_START,
+            RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED,
+            RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED,
+            SUB_ACKED, SUB_ACKED);
         shouldCleanSubs = true;
     }
 
@@ -288,6 +301,59 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         verifyMQTT5UnSubAck(unsubAckMessage,
             new int[] {NoSubscriptionExisted.value(), NoSubscriptionExisted.value(), NoSubscriptionExisted.value()});
         verifyEvent(MQTT_SESSION_START, UNSUB_ACKED);
+    }
+
+    @Test
+    public void retainMatchErrorDoesNotBlockSubV5() {
+        mockCheckPermission(true);
+        mockDistMatch(true);
+        when(retainClient.match(any()))
+            .thenReturn(CompletableFuture.completedFuture(
+                org.apache.bifromq.retain.rpc.proto.MatchReply.newBuilder()
+                    .setResult(org.apache.bifromq.retain.rpc.proto.MatchReply.Result.TRY_LATER)
+                    .build()));
+        int[] qos = {0, 1, 2};
+        MqttSubscribeMessage subMessage = MQTTMessageUtils.qoSMqttSubMessages(qos);
+        channel.writeInbound(subMessage);
+        MqttSubAckMessage subAckMessage = channel.readOutbound();
+        verifySubAck(subAckMessage, qos);
+        verifyEvent(MQTT_SESSION_START, MATCH_RETAIN_ERROR, MATCH_RETAIN_ERROR, MATCH_RETAIN_ERROR, SUB_ACKED);
+        shouldCleanSubs = true;
+    }
+
+    @Test
+    public void retainDisabledNoMatchEventV5() {
+        mockCheckPermission(true);
+        mockDistMatch(true);
+        // ensure retain disabled is applied before handler constructed
+        when(settingProvider.provide(eq(RetainEnabled), anyString())).thenReturn(false);
+
+        // rebuild channel with new handler so settings take effect
+        if (channel != null && channel.isOpen()) {
+            channel.close();
+        }
+        ChannelDuplexHandler sessionHandlerAdder = buildChannelHandler();
+        channel = new EmbeddedChannel(true, true, new ChannelInitializer<>() {
+            @Override
+            protected void initChannel(Channel ch) {
+                ch.attr(ChannelAttrs.MQTT_SESSION_CTX).set(sessionContext);
+                ch.attr(ChannelAttrs.PEER_ADDR).set(new InetSocketAddress(remoteIp, remotePort));
+                ChannelPipeline pipeline = ch.pipeline();
+                pipeline.addLast(new ChannelTrafficShapingHandler(512 * 1024, 512 * 1024));
+                pipeline.addLast(MqttDecoder.class.getName(), new MqttDecoder(256 * 1024));
+                pipeline.addLast(sessionHandlerAdder);
+            }
+        });
+
+        reset(eventCollector);
+        int[] qos = {0, 1, 2};
+        MqttSubscribeMessage subMessage = MQTTMessageUtils.qoSMqttSubMessages(qos);
+        channel.writeInbound(subMessage);
+        channel.runPendingTasks();
+        MqttSubAckMessage subAckMessage = channel.readOutbound();
+        verifySubAck(subAckMessage, qos);
+        verify(eventCollector, atLeast(1)).report(argThat(e -> e.type() == EventType.SUB_ACKED));
+        shouldCleanSubs = true;
     }
 
     @Test
@@ -427,7 +493,11 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         channel.runScheduledPendingTasks();
         channel.runPendingTasks();
         assertTrue(channel.isOpen());
-        verifyEvent(MQTT_SESSION_START, QOS1_DIST_ERROR, SERVER_BUSY);
+        verifyEvent(MQTT_SESSION_START, QOS1_DIST_ERROR, PUB_ACKED);
+        MqttMessage pubAckMessage = channel.readOutbound();
+        // dist error still pub ack, record error log
+        assertEquals(((MqttMessageIdVariableHeader) pubAckMessage.variableHeader()).messageId(), 123);
+
     }
 
     @Test
@@ -504,7 +574,11 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         channel.runScheduledPendingTasks();
         channel.runPendingTasks();
         assertTrue(channel.isOpen());
-        verifyEvent(MQTT_SESSION_START, QOS2_DIST_ERROR, SERVER_BUSY);
+        verifyEvent(MQTT_SESSION_START, QOS2_DIST_ERROR, PUB_RECED);
+
+        MqttMessage pubRecMessage = channel.readOutbound();
+        // dist error still pub rec, record error log
+        assertEquals(((MqttMessageIdVariableHeader) pubRecMessage.variableHeader()).messageId(), 123);
     }
 
     @Test
@@ -899,8 +973,8 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
             assertEquals(message.variableHeader().properties().getProperties(TOPIC_ALIAS.value()).get(0).value(), 1);
             channel.writeInbound(MQTTMessageUtils.pubAckMessage(message.variableHeader().packetId()));
         }
-        verifyEvent(MQTT_SESSION_START, QOS1_PUSHED, QOS1_PUSHED, QOS1_PUSHED, QOS1_CONFIRMED, QOS1_CONFIRMED,
-            QOS1_CONFIRMED);
+        verifyEventUnordered(MQTT_SESSION_START, QOS1_PUSHED, QOS1_PUSHED, QOS1_PUSHED, QOS1_CONFIRMED,
+            QOS1_CONFIRMED, QOS1_CONFIRMED);
     }
 
     @Test
@@ -1029,5 +1103,113 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
 
         verifyEvent(MQTT_SESSION_START, QOS0_PUSHED, QOS0_PUSHED);
 
+    }
+
+    @Test
+    public void noLocalDropQoS1() {
+        mockCheckPermission(true);
+        mockDistMatch(true);
+        mockDistUnMatch(true);
+        MqttSubscriptionOption opt = new MqttSubscriptionOption(MqttQoS.AT_LEAST_ONCE, true, false,
+            MqttSubscriptionOption.RetainedHandlingPolicy.SEND_AT_SUBSCRIBE);
+        MqttSubscribeMessage subMsg = MqttMessageBuilders.subscribe().messageId(901)
+            .addSubscription(topicFilter, opt).build();
+        channel.writeInbound(subMsg);
+        channel.readOutbound();
+
+        ArgumentCaptor<Long> cap = ArgumentCaptor.forClass(Long.class);
+        verify(localDistService).match(anyLong(), eq(topicFilter), cap.capture(), any());
+
+        TopicMessagePack pack = TopicMessagePack.newBuilder().setTopic(topic).addMessage(
+                TopicMessagePack.PublisherPack.newBuilder().setPublisher(clientInfo)
+                    .addMessage(Message.newBuilder().setMessageId(1).setTimestamp(HLC.INST.get())
+                        .setPayload(ByteString.EMPTY).setPubQoS(QoS.AT_LEAST_ONCE).build()))
+            .build();
+        transientSessionHandler.publish(pack,
+            Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, cap.getValue())));
+        channel.runPendingTasks();
+
+        verify(eventCollector).report(
+            argThat(e -> e.type() == QOS1_DROPPED && ((QoS1Dropped) e).reason() == DropReason.NoLocal));
+    }
+
+    @Test
+    public void noLocalDropQoS2() {
+        mockCheckPermission(true);
+        mockDistMatch(true);
+        mockDistUnMatch(true);
+        MqttSubscriptionOption opt = new MqttSubscriptionOption(MqttQoS.EXACTLY_ONCE, true, false,
+            MqttSubscriptionOption.RetainedHandlingPolicy.SEND_AT_SUBSCRIBE);
+        MqttSubscribeMessage subMsg = MqttMessageBuilders.subscribe().messageId(902)
+            .addSubscription(topicFilter, opt).build();
+        channel.writeInbound(subMsg);
+        channel.readOutbound();
+
+        ArgumentCaptor<Long> cap = ArgumentCaptor.forClass(Long.class);
+        verify(localDistService).match(anyLong(), eq(topicFilter), cap.capture(), any());
+
+        TopicMessagePack pack = TopicMessagePack.newBuilder().setTopic(topic).addMessage(
+                TopicMessagePack.PublisherPack.newBuilder().setPublisher(clientInfo)
+                    .addMessage(Message.newBuilder().setMessageId(1).setTimestamp(HLC.INST.get())
+                        .setPayload(ByteString.EMPTY).setPubQoS(QoS.EXACTLY_ONCE).build()))
+            .build();
+        transientSessionHandler.publish(pack,
+            Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, cap.getValue())));
+        channel.runPendingTasks();
+
+        verify(eventCollector).report(
+            argThat(e -> e.type() == QOS2_DROPPED && ((QoS2Dropped) e).reason() == DropReason.NoLocal));
+    }
+
+    @Test
+    public void expiredDropQoS1() {
+        mockCheckPermission(true);
+        mockDistMatch(true);
+        mockDistUnMatch(true);
+        transientSessionHandler.subscribe(System.nanoTime(), topicFilter, QoS.AT_LEAST_ONCE);
+        channel.runPendingTasks();
+        ArgumentCaptor<Long> cap = ArgumentCaptor.forClass(Long.class);
+        verify(localDistService).match(anyLong(), eq(topicFilter), cap.capture(), any());
+
+        long oldMillis = HLC.INST.getPhysical() - 10_000; // 10s earlier in ms
+        long oldTs = (oldMillis << 16); // compose HLC with past physical time
+        TopicMessagePack pack = TopicMessagePack.newBuilder().setTopic(topic).addMessage(
+                TopicMessagePack.PublisherPack.newBuilder().setPublisher(ClientInfo.newBuilder().build())
+                    .addMessage(Message.newBuilder().setMessageId(1).setTimestamp(oldTs)
+                        .setExpiryInterval(1)
+                        .setPayload(ByteString.EMPTY).setPubQoS(QoS.AT_LEAST_ONCE).build()))
+            .build();
+        transientSessionHandler.publish(pack,
+            Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, cap.getValue())));
+        channel.runPendingTasks();
+
+        verify(eventCollector).report(
+            argThat(e -> e.type() == QOS1_DROPPED && ((QoS1Dropped) e).reason() == DropReason.Expired));
+    }
+
+    @Test
+    public void expiredDropQoS2() {
+        mockCheckPermission(true);
+        mockDistMatch(true);
+        mockDistUnMatch(true);
+        transientSessionHandler.subscribe(System.nanoTime(), topicFilter, QoS.EXACTLY_ONCE);
+        channel.runPendingTasks();
+        ArgumentCaptor<Long> cap = ArgumentCaptor.forClass(Long.class);
+        verify(localDistService).match(anyLong(), eq(topicFilter), cap.capture(), any());
+
+        long oldMillis = HLC.INST.getPhysical() - 10_000; // 10s earlier in ms
+        long oldTs = (oldMillis << 16); // compose HLC with past physical time
+        TopicMessagePack pack = TopicMessagePack.newBuilder().setTopic(topic).addMessage(
+                TopicMessagePack.PublisherPack.newBuilder().setPublisher(ClientInfo.newBuilder().build())
+                    .addMessage(Message.newBuilder().setMessageId(1).setTimestamp(oldTs)
+                        .setExpiryInterval(1)
+                        .setPayload(ByteString.EMPTY).setPubQoS(QoS.EXACTLY_ONCE).build()))
+            .build();
+        transientSessionHandler.publish(pack,
+            Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, cap.getValue())));
+        channel.runPendingTasks();
+
+        verify(eventCollector).report(
+            argThat(e -> e.type() == QOS2_DROPPED && ((QoS2Dropped) e).reason() == DropReason.Expired));
     }
 }

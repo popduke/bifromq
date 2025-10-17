@@ -169,6 +169,7 @@ public class KVRangeFSM implements IKVRangeFSM {
     private final BehaviorSubject<KVRangeDescriptor> descriptorSubject = BehaviorSubject.create();
     private final Subject<List<SplitHint>> splitHintsSubject = BehaviorSubject.<List<SplitHint>>create().toSerialized();
     private final Subject<Any> factSubject = BehaviorSubject.create();
+    private final Subject<Boolean> queryReadySubject = BehaviorSubject.createDefault(true).toSerialized();
     private final KVRangeOptions opts;
     private final AtomicBoolean recovering = new AtomicBoolean();
     private final AtomicReference<Lifecycle> lifecycle = new AtomicReference<>(Lifecycle.Init);
@@ -223,15 +224,15 @@ public class KVRangeFSM implements IKVRangeFSM {
         long lastAppliedIndex = this.kvRange.lastAppliedIndex();
         this.linearizer = new KVRangeQueryLinearizer(wal::readIndex, queryExecutor, lastAppliedIndex, tags);
         this.queryRunner = new KVRangeQueryRunner(this.kvRange, coProc, queryExecutor, linearizer,
-            splitHinters, this::latestLeaderDescriptor, resetLock, tags);
+            splitHinters, this::latestDescriptor, resetLock, tags);
         this.statsCollector = new KVRangeStatsCollector(this.kvRange,
             wal, Duration.ofSeconds(opts.getStatsCollectIntervalSec()), bgExecutor);
         this.metricManager = new KVRangeMetricManager(clusterId, hostStoreId, id);
         this.walSubscription = wal.subscribe(lastAppliedIndex,
             new IKVRangeWALSubscriber() {
                 @Override
-                public CompletableFuture<Void> apply(LogEntry log) {
-                    return metricManager.recordLogApply(() -> KVRangeFSM.this.apply(log));
+                public CompletableFuture<Void> apply(LogEntry log, boolean isLeader) {
+                    return metricManager.recordLogApply(() -> KVRangeFSM.this.apply(log, isLeader));
                 }
 
                 @Override
@@ -265,6 +266,8 @@ public class KVRangeFSM implements IKVRangeFSM {
         }
         return mgmtTaskRunner.add(() -> {
             if (lifecycle.compareAndSet(Init, Lifecycle.Opening)) {
+                log.info("Opening range: appliedIndex={}, state={}, ver={}",
+                    kvRange.lastAppliedIndex(), kvRange.state().getType(), print(kvRange.version()));
                 this.messenger = messenger;
                 factSubject.onNext(reset(kvRange.boundary()));
                 // start the wal
@@ -292,12 +295,23 @@ public class KVRangeFSM implements IKVRangeFSM {
                         statsCollector.collect().distinctUntilChanged(),
                         splitHintsSubject.distinctUntilChanged(),
                         factSubject.distinctUntilChanged(),
+                        queryReadySubject.distinctUntilChanged()
+                            .switchMap(v -> {
+                                if (v) {
+                                    return Observable.timer(5, TimeUnit.SECONDS, Schedulers.from(mgmtExecutor))
+                                        .map(t -> true);
+                                } else {
+                                    return Observable.just(false);
+                                }
+                            })
+                            .distinctUntilChanged(),
                         (meta,
                          role,
                          syncStats,
                          rangeStats,
                          splitHints,
-                         fact) -> {
+                         fact,
+                         readyForQuery) -> {
                             log.trace("Split hints: \n{}", splitHints);
                             return KVRangeDescriptor.newBuilder()
                                 .setVer(meta.ver())
@@ -311,15 +325,19 @@ public class KVRangeFSM implements IKVRangeFSM {
                                 .addAllHints(splitHints)
                                 .setHlc(HLC.INST.get())
                                 .setFact(fact)
+                                .setReadyForQuery(readyForQuery)
                                 .build();
                         })
                     .observeOn(Schedulers.from(mgmtExecutor))
                     .subscribe(descriptorSubject::onNext));
                 disposables.add(messenger.receive().subscribe(this::handleMessage));
                 disposables.add(descriptorSubject.subscribe(this::detectZombieState));
+                disposables.add(wal.state()
+                    .observeOn(Schedulers.from(mgmtExecutor))
+                    .subscribe(role -> coProc.onLeader(role == RaftNodeStatus.Leader)));
                 lifecycle.set(Open);
                 metricManager.reportLastAppliedIndex(kvRange.lastAppliedIndex());
-                log.info("Open range: appliedIndex={}, state={}, ver={}",
+                log.info("Range opened: appliedIndex={}, state={}, ver={}",
                     kvRange.lastAppliedIndex(), kvRange.state().getType(), print(kvRange.version()));
                 // make sure latest snapshot exists
                 if (!kvRange.hasCheckpoint(wal.latestSnapshot())) {
@@ -436,7 +454,8 @@ public class KVRangeFSM implements IKVRangeFSM {
             return wal.transferLeadership(newLeader)
                 .exceptionally(unwrap(e -> {
                     if (e instanceof LeaderTransferException.NotFoundOrQualifiedException) {
-                        throw new KVRangeException.BadRequest("Failed to transfer leadership", e);
+                        throw new KVRangeException.BadRequest("Failed to transfer leadership",
+                            latestDescriptor(), e);
                     } else {
                         throw new KVRangeException.TryLater("Failed to transfer leadership", e);
                     }
@@ -636,7 +655,7 @@ public class KVRangeFSM implements IKVRangeFSM {
         }
     }
 
-    private CompletableFuture<Void> apply(LogEntry entry) {
+    private CompletableFuture<Void> apply(LogEntry entry, boolean isLeader) {
         CompletableFuture<Void> onDone = new CompletableFuture<>();
         if (kvRange.lastAppliedIndex() > entry.getIndex()) {
             // skip already applied log
@@ -680,7 +699,7 @@ public class KVRangeFSM implements IKVRangeFSM {
                     State state = kvRange.state();
                     Boundary boundary = kvRange.boundary();
                     ClusterConfig clusterConfig = kvRange.clusterConfig();
-                    applyCommand(version, state, boundary, clusterConfig,
+                    applyCommand(isLeader, version, state, boundary, clusterConfig,
                         entry.getTerm(), entry.getIndex(), command, recordableReader, rangeWriter)
                         .whenComplete((callback, e) -> {
                             if (onDone.isCancelled()) {
@@ -840,7 +859,8 @@ public class KVRangeFSM implements IKVRangeFSM {
         }
     }
 
-    private CompletableFuture<Runnable> applyCommand(long ver,
+    private CompletableFuture<Runnable> applyCommand(boolean isLeader,
+                                                     long ver,
                                                      State state,
                                                      Boundary boundary,
                                                      ClusterConfig clusterConfig,
@@ -1455,7 +1475,7 @@ public class KVRangeFSM implements IKVRangeFSM {
                         }
                         case RWCOPROC -> {
                             Supplier<IKVRangeCoProc.MutationResult> resultSupplier =
-                                coProc.mutate(command.getRwCoProc(), dataReader, rangeWriter.kvWriter());
+                                coProc.mutate(command.getRwCoProc(), dataReader, rangeWriter.kvWriter(), isLeader);
                             onDone.complete(() -> {
                                 IKVRangeCoProc.MutationResult result = resultSupplier.get();
                                 result.fact().ifPresent(factSubject::onNext);
@@ -1492,6 +1512,10 @@ public class KVRangeFSM implements IKVRangeFSM {
             return descriptorSubject.getValue();
         }
         return null;
+    }
+
+    private KVRangeDescriptor latestDescriptor() {
+        return descriptorSubject.getValue();
     }
 
     private CompletableFuture<Void> restore(KVRangeSnapshot snapshot,
@@ -1817,11 +1841,15 @@ public class KVRangeFSM implements IKVRangeFSM {
     }
 
     private Any reset(Boundary boundary) {
+        long startAt = System.nanoTime();
         long stamp = resetLock.writeLock();
         try {
+            queryReadySubject.onNext(false);
             return coProc.reset(boundary);
         } finally {
             resetLock.unlockWrite(stamp);
+            queryReadySubject.onNext(true);
+            log.debug("Reset coProc done, took {} ms", Duration.ofNanos(System.nanoTime() - startAt).toMillis());
         }
     }
 

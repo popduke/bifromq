@@ -14,19 +14,25 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
-package org.apache.bifromq.basekv.utils;
+package org.apache.bifromq.util.index;
 
-import org.apache.bifromq.basekv.proto.KVRangeDescriptor;
-import org.apache.bifromq.basekv.proto.KVRangeStoreDescriptor;
+class TestValueStrategy implements ValueStrategy<TestVal> {
+    @Override
+    public int hash(TestVal value) {
+        return value == null ? 0 : value.key().hashCode();
+    }
 
-/**
- * The descriptors of leader range and its hosting store.
- *
- * @param descriptor           rangeDescriptor
- * @param ownerStoreDescriptor storeDescriptor
- */
-public record LeaderRange(KVRangeDescriptor descriptor, KVRangeStoreDescriptor ownerStoreDescriptor) {
+    @Override
+    public boolean equivalent(TestVal a, TestVal b) {
+        if (a == b) {
+            return true;
+        }
+        if (a == null || b == null) {
+            return false;
+        }
+        return a.key().equals(b.key());
+    }
 }

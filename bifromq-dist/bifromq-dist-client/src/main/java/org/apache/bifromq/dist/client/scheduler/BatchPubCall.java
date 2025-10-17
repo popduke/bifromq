@@ -20,13 +20,13 @@
 package org.apache.bifromq.dist.client.scheduler;
 
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Queue;
 import java.util.concurrent.CompletableFuture;
-import org.apache.bifromq.base.util.AsyncRetry;
-import org.apache.bifromq.base.util.exception.NeedRetryException;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.bifromq.baserpc.client.IRPCClient;
 import org.apache.bifromq.basescheduler.IBatchCall;
 import org.apache.bifromq.basescheduler.ICallTask;
@@ -36,19 +36,23 @@ import org.apache.bifromq.dist.rpc.proto.DistRequest;
 import org.apache.bifromq.type.ClientInfo;
 import org.apache.bifromq.type.PublisherMessagePack;
 
+@Slf4j
 class BatchPubCall implements IBatchCall<PubRequest, PubResult, PubCallBatcherKey> {
     private final IRPCClient.IRequestPipeline<DistRequest, DistReply> ppln;
-    private final Queue<ICallTask<PubRequest, PubResult, PubCallBatcherKey>> tasks = new ArrayDeque<>(64);
-    private final long retryTimeoutNanos;
-    private final Map<ClientInfo, Map<String, PublisherMessagePack.TopicPack.Builder>> clientMsgPack = new HashMap<>(128);
+    private Queue<ICallTask<PubRequest, PubResult, PubCallBatcherKey>> tasks = new ArrayDeque<>(64);
+    private Map<ClientInfo, Map<String, PublisherMessagePack.TopicPack.Builder>> clientMsgPack = new HashMap<>(
+        128);
 
-    BatchPubCall(IRPCClient.IRequestPipeline<DistRequest, DistReply> ppln, long retryTimeoutNanos) {
+    BatchPubCall(IRPCClient.IRequestPipeline<DistRequest, DistReply> ppln) {
         this.ppln = ppln;
-        this.retryTimeoutNanos = retryTimeoutNanos;
     }
 
     @Override
-    public void reset() {
+    public void reset(boolean abort) {
+        if (abort) {
+            tasks = new ArrayDeque<>(64);
+            clientMsgPack = new HashMap<>(128);
+        }
     }
 
     @Override
@@ -62,6 +66,11 @@ class BatchPubCall implements IBatchCall<PubRequest, PubResult, PubCallBatcherKe
 
     @Override
     public CompletableFuture<Void> execute() {
+        return execute(tasks, clientMsgPack);
+    }
+
+    private CompletableFuture<Void> execute(Queue<ICallTask<PubRequest, PubResult, PubCallBatcherKey>> tasks,
+                                            Map<ClientInfo, Map<String, PublisherMessagePack.TopicPack.Builder>> clientMsgPack) {
         DistRequest.Builder requestBuilder = DistRequest.newBuilder().setReqId(System.nanoTime());
         Iterator<Map.Entry<ClientInfo, Map<String, PublisherMessagePack.TopicPack.Builder>>> itr =
             clientMsgPack.entrySet().iterator();
@@ -78,59 +87,64 @@ class BatchPubCall implements IBatchCall<PubRequest, PubResult, PubCallBatcherKe
             itr.remove();
         }
         DistRequest request = requestBuilder.build();
-        return AsyncRetry.exec(() -> execute(request), retryTimeoutNanos);
-    }
-
-    private CompletableFuture<Void> execute(DistRequest request) {
-        CompletableFuture<Void> onDone = new CompletableFuture<>();
-        execute(request, onDone);
-        return onDone;
-    }
-
-    private void execute(DistRequest request, CompletableFuture<Void> onDone) {
-        ppln.invoke(request)
-            .whenComplete((reply, e) -> {
+        return ppln.invoke(request)
+            .handle((reply, e) -> {
                 if (e != null) {
                     ICallTask<PubRequest, PubResult, PubCallBatcherKey> task;
                     while ((task = tasks.poll()) != null) {
                         task.resultPromise().complete(PubResult.ERROR);
                     }
-                    onDone.complete(null);
                 } else {
                     switch (reply.getCode()) {
                         case OK -> {
-                            Map<ClientInfo, Map<String, Integer>> fanoutResultMap = new HashMap<>();
-                            for (int i = 0; i < request.getMessagesCount(); i++) {
-                                PublisherMessagePack pubMsgPack = request.getMessages(i);
-                                DistReply.DistResult result = reply.getResults(i);
-                                fanoutResultMap.put(pubMsgPack.getPublisher(), result.getTopicMap());
-                            }
+                            try {
+                                Map<ClientInfo, Map<String, Integer>> fanoutResultMap = new HashMap<>();
+                                for (int i = 0; i < request.getMessagesCount(); i++) {
+                                    PublisherMessagePack pubMsgPack = request.getMessages(i);
+                                    DistReply.DistResult result = reply.getResults(i);
+                                    fanoutResultMap.put(pubMsgPack.getPublisher(), result.getTopicMap());
+                                }
 
-                            ICallTask<PubRequest, PubResult, PubCallBatcherKey> task;
-                            while ((task = tasks.poll()) != null) {
-                                Integer fanOut = fanoutResultMap.get(task.call().publisher).get(task.call().topic);
-                                task.resultPromise().complete(fanOut > 0 ? PubResult.OK : PubResult.NO_MATCH);
+                                ICallTask<PubRequest, PubResult, PubCallBatcherKey> task;
+                                while ((task = tasks.poll()) != null) {
+                                    Integer fanOut = fanoutResultMap.getOrDefault(task.call().publisher,
+                                        Collections.emptyMap()).get(task.call().topic);
+                                    if (fanOut == null) {
+                                        // should not happen
+                                        log.warn("Illegal state: no dist result for topic: {}", task.call().topic);
+                                        fanOut = 0;
+                                    }
+                                    switch (fanOut) {
+                                        case -2 -> task.resultPromise().complete(PubResult.ERROR);
+                                        case -1 -> task.resultPromise().complete(PubResult.TRY_LATER);
+                                        case 0 -> task.resultPromise().complete(PubResult.NO_MATCH);
+                                        default -> task.resultPromise().complete(PubResult.OK);
+                                    }
+                                }
+                            } catch (Throwable t) {
+                                log.error("Unexpected exception", t);
+                                ICallTask<PubRequest, PubResult, PubCallBatcherKey> task;
+                                while ((task = tasks.poll()) != null) {
+                                    task.resultPromise().complete(PubResult.ERROR);
+                                }
                             }
-                            onDone.complete(null);
                         }
                         case BACK_PRESSURE_REJECTED -> {
                             ICallTask<PubRequest, PubResult, PubCallBatcherKey> task;
                             while ((task = tasks.poll()) != null) {
                                 task.resultPromise().complete(PubResult.BACK_PRESSURE_REJECTED);
                             }
-                            onDone.complete(null);
                         }
-                        case TRY_LATER -> onDone.completeExceptionally(new NeedRetryException("Retry later"));
                         default -> {
                             assert reply.getCode() == DistReply.Code.ERROR;
                             ICallTask<PubRequest, PubResult, PubCallBatcherKey> task;
                             while ((task = tasks.poll()) != null) {
                                 task.resultPromise().complete(PubResult.ERROR);
                             }
-                            onDone.complete(null);
                         }
                     }
                 }
+                return null;
             });
     }
 }

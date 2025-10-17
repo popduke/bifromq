@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.mqtt.handler.v3;
@@ -34,6 +34,7 @@ import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_CONFIRMED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_DROPPED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_PUSHED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.QOS2_RECEIVED;
+import static org.apache.bifromq.plugin.eventcollector.EventType.RETAIN_MSG_MATCHED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.SUB_ACKED;
 import static org.apache.bifromq.plugin.eventcollector.EventType.UNSUB_ACKED;
 import static org.apache.bifromq.type.MQTTClientInfoConstants.MQTT_TYPE_VALUE;
@@ -156,7 +157,7 @@ public class MQTT3PersistentSessionHandlerTest extends BaseSessionHandlerTest {
         channel.runPendingTasks();
         MqttSubAckMessage subAckMessage = channel.readOutbound();
         verifySubAck(subAckMessage, qos);
-        verifyEvent(SUB_ACKED);
+        verifyEvent(RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, SUB_ACKED);
     }
 
     @Test
@@ -170,7 +171,7 @@ public class MQTT3PersistentSessionHandlerTest extends BaseSessionHandlerTest {
         channel.runPendingTasks();
         MqttSubAckMessage subAckMessage = channel.readOutbound();
         verifySubAck(subAckMessage, qos);
-        verifyEvent(SUB_ACKED);
+        verifyEvent(RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, SUB_ACKED);
     }
 
     @Test
@@ -184,7 +185,7 @@ public class MQTT3PersistentSessionHandlerTest extends BaseSessionHandlerTest {
         channel.runPendingTasks();
         MqttSubAckMessage subAckMessage = channel.readOutbound();
         verifySubAck(subAckMessage, qos);
-        verifyEvent(SUB_ACKED);
+        verifyEvent(RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, SUB_ACKED);
     }
 
     @Test
@@ -200,7 +201,7 @@ public class MQTT3PersistentSessionHandlerTest extends BaseSessionHandlerTest {
         channel.runPendingTasks();
         MqttSubAckMessage subAckMessage = channel.readOutbound();
         verifySubAck(subAckMessage, qos);
-        verifyEvent(SUB_ACKED);
+        verifyEvent(RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, RETAIN_MSG_MATCHED, SUB_ACKED);
     }
 
     @Test
@@ -332,7 +333,7 @@ public class MQTT3PersistentSessionHandlerTest extends BaseSessionHandlerTest {
             assertEquals(message.variableHeader().topicName(), topic);
             channel.writeInbound(MQTTMessageUtils.pubAckMessage(message.variableHeader().packetId()));
         }
-        verifyEvent(QOS1_PUSHED, QOS1_PUSHED, QOS1_PUSHED, QOS1_CONFIRMED, QOS1_CONFIRMED, QOS1_CONFIRMED);
+        verifyEventUnordered(QOS1_PUSHED, QOS1_PUSHED, QOS1_PUSHED, QOS1_CONFIRMED, QOS1_CONFIRMED, QOS1_CONFIRMED);
         verify(inboxClient, times(3)).commit(argThat(CommitRequest::hasSendBufferUpToSeq));
     }
 
@@ -430,7 +431,7 @@ public class MQTT3PersistentSessionHandlerTest extends BaseSessionHandlerTest {
                 channel.writeInbound(MQTTMessageUtils.pubAckMessage(message.variableHeader().packetId()));
             }
         }
-        verifyEvent(QOS1_PUSHED, QOS1_PUSHED, QOS1_PUSHED, QOS1_CONFIRMED, QOS1_CONFIRMED);
+        verifyEventUnordered(QOS1_PUSHED, QOS1_PUSHED, QOS1_PUSHED, QOS1_CONFIRMED, QOS1_CONFIRMED);
         verify(inboxClient, times(2)).commit(argThat(CommitRequest::hasSendBufferUpToSeq));
     }
 
@@ -451,8 +452,8 @@ public class MQTT3PersistentSessionHandlerTest extends BaseSessionHandlerTest {
             MqttPublishMessage message = channel.readOutbound();
             assertNull(message);
         }
-        verifyEvent(QOS1_DROPPED, QOS1_DROPPED, QOS1_DROPPED, QOS1_CONFIRMED, QOS1_CONFIRMED);
-        verify(eventCollector, times(5)).report(argThat(e -> {
+        verifyEventUnordered(QOS1_DROPPED, QOS1_DROPPED, QOS1_DROPPED, QOS1_CONFIRMED, QOS1_CONFIRMED, QOS1_CONFIRMED);
+        verify(eventCollector, times(6)).report(argThat(e -> {
             if (e instanceof QoS1Confirmed evt) {
                 return !evt.delivered();
             }
@@ -503,8 +504,8 @@ public class MQTT3PersistentSessionHandlerTest extends BaseSessionHandlerTest {
             MqttPublishMessage message = channel.readOutbound();
             assertNull(message);
         }
-        verifyEvent(QOS2_DROPPED, QOS2_DROPPED, QOS2_DROPPED, QOS2_CONFIRMED, QOS2_CONFIRMED);
-        verify(eventCollector, times(5)).report(argThat(e -> {
+        verifyEventUnordered(QOS2_DROPPED, QOS2_DROPPED, QOS2_DROPPED, QOS2_CONFIRMED, QOS2_CONFIRMED, QOS2_CONFIRMED);
+        verify(eventCollector, times(6)).report(argThat(e -> {
             if (e instanceof QoS2Confirmed evt) {
                 return !evt.delivered();
             }

@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.inbox.store;
@@ -23,8 +23,10 @@ import static org.apache.bifromq.basekv.utils.BoundaryUtil.FULL_BOUNDARY;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
-import static org.testng.Assert.assertEquals;
 
+import java.util.HashMap;
+import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
 import org.apache.bifromq.basehlc.HLC;
 import org.apache.bifromq.basekv.client.IBaseKVStoreClient;
 import org.apache.bifromq.basekv.client.KVRangeSetting;
@@ -37,23 +39,27 @@ import org.apache.bifromq.basekv.utils.BoundaryUtil;
 import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
 import org.apache.bifromq.inbox.storage.proto.GCReply;
 import org.apache.bifromq.inbox.storage.proto.InboxServiceROCoProcOutput;
-import java.util.TreeMap;
-import java.util.concurrent.CompletableFuture;
 import org.mockito.Mock;
 import org.mockito.MockitoAnnotations;
 import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-
 public class InboxGCProcessorTest {
 
     private final String localStoreId = "testLocalStoreId";
-    private final KVRangeSetting localRangeSetting = new KVRangeSetting("cluster", localStoreId,
-        KVRangeDescriptor.newBuilder().setId(KVRangeIdUtil.generate()).build());
+    private final KVRangeSetting localRangeSetting = new KVRangeSetting("cluster", localStoreId, new HashMap<>() {
+        {
+            put(localStoreId, KVRangeDescriptor.newBuilder().setId(KVRangeIdUtil.generate()).build());
+        }
+    });
     private final String remoteStoreId = "testRemoteStoreId";
-    private final KVRangeSetting remoteRangeSetting = new KVRangeSetting("cluster", remoteStoreId,
-        KVRangeDescriptor.newBuilder().setId(KVRangeIdUtil.generate()).setBoundary(FULL_BOUNDARY).build());
+    private final KVRangeSetting remoteRangeSetting = new KVRangeSetting("cluster", remoteStoreId, new HashMap<>() {
+        {
+            put(remoteStoreId, KVRangeDescriptor.newBuilder().setId(KVRangeIdUtil.generate())
+                .setBoundary(FULL_BOUNDARY).build());
+        }
+    });
     @Mock
     private IBaseKVStoreClient storeClient;
     private InboxStoreGCProcessor inboxGCProc;
@@ -83,47 +89,45 @@ public class InboxGCProcessorTest {
                         .build())
                     .build())
                 .build()));
-        IInboxStoreGCProcessor.Result result =
-            inboxGCProc.gc(System.nanoTime(), HLC.INST.getPhysical()).join();
-        assertEquals(result, IInboxStoreGCProcessor.Result.OK);
+        inboxGCProc.gc(System.nanoTime(), HLC.INST.getPhysical()).join();
     }
 
     @Test
     public void testStoreQueryException() {
         inboxGCProc = new InboxStoreGCProcessor(storeClient, localStoreId);
-        when(storeClient.latestEffectiveRouter()).thenReturn(new TreeMap<>(BoundaryUtil::compare) {{
-            put(FULL_BOUNDARY, localRangeSetting);
-        }});
+        when(storeClient.latestEffectiveRouter()).thenReturn(new TreeMap<>(BoundaryUtil::compare) {
+            {
+                put(FULL_BOUNDARY, localRangeSetting);
+            }
+        });
 
         when(storeClient.query(anyString(), any())).thenReturn(CompletableFuture.failedFuture(new RuntimeException()));
-        IInboxStoreGCProcessor.Result result =
-            inboxGCProc.gc(System.nanoTime(), HLC.INST.getPhysical()).join();
-        assertEquals(result, IInboxStoreGCProcessor.Result.ERROR);
+        inboxGCProc.gc(System.nanoTime(), HLC.INST.getPhysical()).join();
     }
 
     @Test
     public void testStoreQueryFailed() {
         inboxGCProc = new InboxStoreGCProcessor(storeClient, localStoreId);
-        when(storeClient.latestEffectiveRouter()).thenReturn(new TreeMap<>(BoundaryUtil::compare) {{
-            put(FULL_BOUNDARY, localRangeSetting);
-        }});
+        when(storeClient.latestEffectiveRouter()).thenReturn(new TreeMap<>(BoundaryUtil::compare) {
+            {
+                put(FULL_BOUNDARY, localRangeSetting);
+            }
+        });
         when(storeClient.query(anyString(), any())).thenReturn(
             CompletableFuture.completedFuture(KVRangeROReply.newBuilder().setCode(ReplyCode.InternalError).build()));
-        IInboxStoreGCProcessor.Result result =
-            inboxGCProc.gc(System.nanoTime(), HLC.INST.getPhysical()).join();
-        assertEquals(result, IInboxStoreGCProcessor.Result.ERROR);
+        inboxGCProc.gc(System.nanoTime(), HLC.INST.getPhysical()).join();
     }
 
     @Test
     public void testGCScanFailed() {
         inboxGCProc = new InboxStoreGCProcessor(storeClient, localStoreId);
-        when(storeClient.latestEffectiveRouter()).thenReturn(new TreeMap<>(BoundaryUtil::compare) {{
-            put(FULL_BOUNDARY, localRangeSetting);
-        }});
+        when(storeClient.latestEffectiveRouter()).thenReturn(new TreeMap<>(BoundaryUtil::compare) {
+            {
+                put(FULL_BOUNDARY, localRangeSetting);
+            }
+        });
 
         when(storeClient.query(anyString(), any())).thenReturn(CompletableFuture.failedFuture(new TryLaterException()));
-        IInboxStoreGCProcessor.Result result = inboxGCProc.gc(System.nanoTime(), HLC.INST.getPhysical()).join();
-        assertEquals(result, IInboxStoreGCProcessor.Result.ERROR);
+        inboxGCProc.gc(System.nanoTime(), HLC.INST.getPhysical()).join();
     }
 }
-
