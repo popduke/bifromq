@@ -20,6 +20,7 @@
 package org.apache.bifromq.basekv.raft;
 
 import static org.apache.bifromq.base.util.CompletableFutureUtil.unwrap;
+import static org.apache.bifromq.basekv.raft.RaftConfigChanger.State.FallbackConfigCommitting;
 import static org.apache.bifromq.basekv.raft.RaftConfigChanger.State.JointConfigCommitting;
 import static org.apache.bifromq.basekv.raft.RaftConfigChanger.State.TargetConfigCommitting;
 
@@ -28,7 +29,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -156,10 +156,11 @@ class RaftNodeStateLeader extends RaftNodeState {
         peerLogTracker.tick();
         if (configChanger.tick(currentTerm())) {
             // there is a state change after tick
-            if (configChanger.state() == JointConfigCommitting || configChanger.state() == TargetConfigCommitting) {
-                log.debug("{} cluster config is activated in current term",
-                    configChanger.state() == JointConfigCommitting ? "Joint" : "Target");
+            if (configChanger.state() == JointConfigCommitting
+                || configChanger.state() == TargetConfigCommitting
+                || configChanger.state() == FallbackConfigCommitting) {
                 ClusterConfig clusterConfig = stateStorage.latestClusterConfig();
+                log.debug("Activate config in current term: {}", clusterConfig);
                 activityTracker.refresh(clusterConfig);
                 electionElapsedTick = 0; // to prevent leader from quorum check failed prematurely
                 if (leaderTransferTask != null) {
@@ -557,33 +558,33 @@ class RaftNodeStateLeader extends RaftNodeState {
                 long preLogTerm = stateStorage.entryAt(preLogIndex)
                     .map(LogEntry::getTerm).orElseGet(() -> stateStorage.latestSnapshot().getTerm());
                 if (!peerLogTracker.pauseReplicating(peer) && nextIndex <= stateStorage.lastIndex()) {
-                    Iterator<LogEntry> entries = stateStorage.entries(nextIndex,
-                        stateStorage.lastIndex() + 1, config.getMaxSizePerAppend());
-                    AppendEntries.Builder builder = AppendEntries
-                        .newBuilder()
-                        .setLeaderId(stateStorage.local())
-                        .setPrevLogIndex(preLogIndex)
-                        .setPrevLogTerm(preLogTerm)
-                        .setCommitIndex(commitIndex) // tell follower the latest commit index
-                        .setReadIndex(readIndex);
-                    entries.forEachRemaining(builder::addEntries);
-                    AppendEntries appendEntries = builder.build();
-                    messages.add(RaftMessage.newBuilder()
-                        .setTerm(currentTerm())
-                        .setAppendEntries(appendEntries)
-                        .build());
-
-                    assert appendEntries.getEntriesCount() != 0;
-                    log.trace("Prepare {} entries after "
-                            + "entry[index:{},term:{}] for peer[{}] with readIndex[{}] when {}",
-                        appendEntries.getEntriesCount(),
-                        preLogIndex,
-                        preLogTerm,
-                        peer,
-                        readIndex,
-                        peerLogTracker.status(peer));
-                    peerLogTracker.replicateBy(peer,
-                        appendEntries.getEntries(appendEntries.getEntriesCount() - 1).getIndex());
+                    try (ILogEntryIterator entries = stateStorage.entries(nextIndex,
+                        stateStorage.lastIndex() + 1, config.getMaxSizePerAppend())) {
+                        AppendEntries.Builder builder = AppendEntries
+                            .newBuilder()
+                            .setLeaderId(stateStorage.local())
+                            .setPrevLogIndex(preLogIndex)
+                            .setPrevLogTerm(preLogTerm)
+                            .setCommitIndex(commitIndex) // tell follower the latest commit index
+                            .setReadIndex(readIndex);
+                        entries.forEachRemaining(builder::addEntries);
+                        AppendEntries appendEntries = builder.build();
+                        messages.add(RaftMessage.newBuilder()
+                            .setTerm(currentTerm())
+                            .setAppendEntries(appendEntries)
+                            .build());
+                        assert appendEntries.getEntriesCount() != 0;
+                        log.trace("Prepare {} entries after "
+                                + "entry[index:{},term:{}] for peer[{}] with readIndex[{}] when {}",
+                            appendEntries.getEntriesCount(),
+                            preLogIndex,
+                            preLogTerm,
+                            peer,
+                            readIndex,
+                            peerLogTracker.status(peer));
+                        peerLogTracker.replicateBy(peer,
+                            appendEntries.getEntries(appendEntries.getEntriesCount() - 1).getIndex());
+                    }
                     break;
                 }
                 if (forceHeartbeat || peerLogTracker.needHeartbeat(peer)) {
@@ -719,6 +720,9 @@ class RaftNodeStateLeader extends RaftNodeState {
                         leaderTransferTask.abort(LeaderTransferException.notFoundOrQualified());
                         leaderTransferTask = null;
                     }
+                }
+                case FallbackConfigCommitting -> {
+                    // do nothing when fallback config is committed
                 }
                 default -> {
                     // do nothing

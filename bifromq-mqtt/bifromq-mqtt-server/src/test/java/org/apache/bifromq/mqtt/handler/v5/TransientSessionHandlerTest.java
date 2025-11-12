@@ -19,7 +19,6 @@
 
 package org.apache.bifromq.mqtt.handler.v5;
 
-
 import static io.netty.handler.codec.mqtt.MqttMessageType.DISCONNECT;
 import static io.netty.handler.codec.mqtt.MqttMessageType.PUBACK;
 import static io.netty.handler.codec.mqtt.MqttMessageType.PUBREC;
@@ -31,6 +30,7 @@ import static org.apache.bifromq.mqtt.handler.v5.reason.MQTT5UnsubAckReasonCode.
 import static org.apache.bifromq.mqtt.handler.v5.reason.MQTT5UnsubAckReasonCode.NotAuthorized;
 import static org.apache.bifromq.mqtt.handler.v5.reason.MQTT5UnsubAckReasonCode.Success;
 import static org.apache.bifromq.mqtt.handler.v5.reason.MQTT5UnsubAckReasonCode.UnspecifiedError;
+import static org.apache.bifromq.plugin.eventcollector.EventType.BY_SERVER;
 import static org.apache.bifromq.plugin.eventcollector.EventType.EXCEED_PUB_RATE;
 import static org.apache.bifromq.plugin.eventcollector.EventType.EXCEED_RECEIVING_LIMIT;
 import static org.apache.bifromq.plugin.eventcollector.EventType.INVALID_TOPIC;
@@ -69,6 +69,7 @@ import static org.apache.bifromq.retain.rpc.proto.RetainReply.Result.CLEARED;
 import static org.apache.bifromq.retain.rpc.proto.RetainReply.Result.ERROR;
 import static org.apache.bifromq.retain.rpc.proto.RetainReply.Result.RETAINED;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -118,6 +119,7 @@ import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bifromq.basehlc.HLC;
 import org.apache.bifromq.dist.client.PubResult;
+import org.apache.bifromq.metrics.TenantMetric;
 import org.apache.bifromq.mqtt.handler.BaseSessionHandlerTest;
 import org.apache.bifromq.mqtt.handler.ChannelAttrs;
 import org.apache.bifromq.mqtt.handler.TenantSettings;
@@ -169,6 +171,100 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         });
         //channel.freezeTime();
         transientSessionHandler = (MQTT5TransientSessionHandler) channel.pipeline().last();
+    }
+
+    @Test
+    public void disconnectByServer() {
+        assertTrue(channel.isOpen());
+        MQTT5TransientSessionHandler handler = (MQTT5TransientSessionHandler) channel.pipeline().last();
+        // Ensure handler fully initialized before shutdown
+        handler.awaitInitialized().join();
+        // Drive event loop to trigger close before waiting
+        CompletableFuture<Void> shutdown = handler.onServerShuttingDown(); // non-blocking
+        channel.runPendingTasks();
+        channel.runScheduledPendingTasks();
+        shutdown.join();
+
+        MqttMessage disconnMessage = channel.readOutbound();
+        assertEquals(disconnMessage.fixedHeader().messageType(), DISCONNECT);
+        assertEquals(((MqttReasonCodeAndPropertiesVariableHeader) disconnMessage.variableHeader()).reasonCode(),
+            MQTT5DisconnectReasonCode.ServerShuttingDown.value());
+        assertFalse(channel.isActive());
+        verify(eventCollector).report(argThat(e -> e.type() == BY_SERVER));
+    }
+
+    @Test
+    public void dedupQoS1() {
+        mockCheckPermission(true);
+        mockDistMatch(true);
+        transientSessionHandler.subscribe(System.nanoTime(), topicFilter, QoS.AT_LEAST_ONCE);
+        channel.runPendingTasks();
+        ArgumentCaptor<Long> longCaptor = ArgumentCaptor.forClass(Long.class);
+        verify(localDistService).match(anyLong(), eq(topicFilter), longCaptor.capture(), any());
+
+        long now = HLC.INST.get();
+        TopicMessagePack pack = TopicMessagePack.newBuilder()
+            .setTopic(topic)
+            .addMessage(TopicMessagePack.PublisherPack.newBuilder()
+                .setPublisher(ClientInfo.newBuilder()
+                    .putMetadata(MQTTClientInfoConstants.MQTT_CHANNEL_ID_KEY, "channel1")
+                    .build())
+                .addMessage(Message.newBuilder()
+                    .setMessageId(1)
+                    .setExpiryInterval(Integer.MAX_VALUE)
+                    .setPayload(ByteString.EMPTY)
+                    .setTimestamp(now)
+                    .setPubQoS(QoS.AT_LEAST_ONCE)
+                    .build()))
+            .build();
+
+        transientSessionHandler.publish(pack,
+            Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, longCaptor.getValue())));
+        channel.runPendingTasks();
+        transientSessionHandler.publish(pack,
+            Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, longCaptor.getValue())));
+        channel.runPendingTasks();
+
+        MqttPublishMessage first = channel.readOutbound();
+        assertEquals(first.fixedHeader().qosLevel().value(), QoS.AT_LEAST_ONCE_VALUE);
+        assertEquals(first.variableHeader().topicName(), topic);
+
+        verify(tenantMeter, times(1)).recordSummary(eq(TenantMetric.MqttDeDupBytes), anyDouble());
+        verify(eventCollector).report(
+            argThat(e -> e.type() == QOS1_DROPPED && ((QoS1Dropped) e).reason() == DropReason.Duplicated));
+    }
+
+    @Test
+    public void dedupQoS2() {
+        mockCheckPermission(true);
+        mockDistMatch(true);
+        transientSessionHandler.subscribe(System.nanoTime(), topicFilter, QoS.EXACTLY_ONCE);
+        channel.runPendingTasks();
+        ArgumentCaptor<Long> longCaptor = ArgumentCaptor.forClass(Long.class);
+        verify(localDistService).match(anyLong(), eq(topicFilter), longCaptor.capture(), any());
+
+        long now = HLC.INST.get();
+        TopicMessagePack pack = TopicMessagePack.newBuilder().setTopic(topic).addMessage(
+                TopicMessagePack.PublisherPack.newBuilder().setPublisher(
+                        ClientInfo.newBuilder().putMetadata(MQTTClientInfoConstants.MQTT_CHANNEL_ID_KEY, "channel1").build())
+                    .addMessage(Message.newBuilder().setMessageId(2).setExpiryInterval(Integer.MAX_VALUE)
+                        .setPayload(ByteString.EMPTY).setTimestamp(now).setPubQoS(QoS.EXACTLY_ONCE).build()))
+            .build();
+
+        transientSessionHandler.publish(pack,
+            Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, longCaptor.getValue())));
+        channel.runPendingTasks();
+        transientSessionHandler.publish(pack,
+            Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, longCaptor.getValue())));
+        channel.runPendingTasks();
+
+        MqttPublishMessage first = channel.readOutbound();
+        assertEquals(first.fixedHeader().qosLevel().value(), QoS.EXACTLY_ONCE_VALUE);
+        assertEquals(first.variableHeader().topicName(), topic);
+
+        verify(tenantMeter, times(1)).recordSummary(eq(TenantMetric.MqttDeDupBytes), anyDouble());
+        verify(eventCollector).report(
+            argThat(e -> e.type() == QOS2_DROPPED && ((QoS2Dropped) e).reason() == DropReason.Duplicated));
     }
 
     @SneakyThrows
@@ -941,10 +1037,14 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         verify(localDistService).match(anyLong(), eq(topicFilter), longCaptor.capture(), any());
 
         channel.writeOneOutbound(MQTTMessageUtils.largeMqttMessage(300 * 1024));
+        channel.writeOneOutbound(MQTTMessageUtils.largeMqttMessage(300 * 1024));
+        assertFalse(channel.isWritable()); // ensure overflow path
         List<ByteBuffer> payloads = s2cMessagesPayload(1, 32 * 1024);
         transientSessionHandler.publish(s2cMQTT5MessageList(topic, payloads, QoS.AT_MOST_ONCE),
             Collections.singleton(new IMQTTTransientSession.MatchedTopicFilter(topicFilter, longCaptor.getValue())));
         channel.runPendingTasks();
+        channel.readOutbound();
+        channel.readOutbound();
         MqttPublishMessage message = channel.readOutbound();
         assertNull(message);
         verifyEvent(MQTT_SESSION_START, QOS0_DROPPED);
@@ -1032,6 +1132,8 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         assertEquals(message.variableHeader().topicName(), topic);
 
         verifyEvent(MQTT_SESSION_START, QOS0_PUSHED, QOS0_DROPPED);
+        // verify dedup metric recorded
+        verify(tenantMeter).recordSummary(eq(TenantMetric.MqttDeDupBytes), anyDouble());
     }
 
     @Test
@@ -1063,6 +1165,8 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         assertEquals(message.variableHeader().topicName(), topic);
 
         verifyEvent(MQTT_SESSION_START, QOS0_PUSHED, QOS0_PUSHED);
+        // verify dedup metric NOT recorded for non MQTT publisher
+        verify(tenantMeter, times(0)).recordSummary(eq(TenantMetric.MqttDeDupBytes), anyDouble());
 
     }
 
@@ -1102,6 +1206,8 @@ public class TransientSessionHandlerTest extends BaseSessionHandlerTest {
         assertEquals(message.variableHeader().topicName(), topic);
 
         verifyEvent(MQTT_SESSION_START, QOS0_PUSHED, QOS0_PUSHED);
+        // verify dedup metric NOT recorded for retain messages
+        verify(tenantMeter, times(0)).recordSummary(eq(TenantMetric.MqttDeDupBytes), anyDouble());
 
     }
 

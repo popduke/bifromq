@@ -19,6 +19,10 @@
 
 package org.apache.bifromq.starter.config.model.dist;
 
+import static org.apache.bifromq.basekv.localengine.rocksdb.RocksDBDefaultConfigs.COMPACT_MIN_TOMBSTONE_KEYS;
+import static org.apache.bifromq.basekv.localengine.rocksdb.RocksDBDefaultConfigs.COMPACT_MIN_TOMBSTONE_RANGES;
+import static org.apache.bifromq.basekv.localengine.rocksdb.RocksDBDefaultConfigs.MANUAL_COMPACTION;
+
 import com.fasterxml.jackson.annotation.JsonMerge;
 import com.fasterxml.jackson.annotation.JsonSetter;
 import com.fasterxml.jackson.annotation.Nulls;
@@ -29,8 +33,8 @@ import java.util.Map;
 import lombok.Getter;
 import lombok.Setter;
 import org.apache.bifromq.starter.config.model.BalancerOptions;
-import org.apache.bifromq.starter.config.model.RocksDBEngineConfig;
-import org.apache.bifromq.starter.config.model.StorageEngineConfig;
+import org.apache.bifromq.starter.config.model.EngineConfig;
+import org.apache.bifromq.starter.config.model.SplitHinterOptions;
 
 @Getter
 @Setter
@@ -40,20 +44,35 @@ public class DistWorkerConfig {
     private int workerThreads = 0;
     private int tickerThreads = Math.max(1, Runtime.getRuntime().availableProcessors() / 20);
     private int maxWALFetchSize = 10 * 1024 * 1024; // 10MB
-    private int compactWALThreshold = 2500;
+    private int compactWALThreshold = 256 * 1024 * 1024;
     private int minGCIntervalSeconds = 30; // every 30 s
     private int maxGCIntervalSeconds = 24 * 3600; // every day
     @JsonSetter(nulls = Nulls.SKIP)
     @JsonMerge
-    private StorageEngineConfig dataEngineConfig = new RocksDBEngineConfig();
+    private EngineConfig dataEngineConfig = new EngineConfig()
+        .setType("rocksdb")
+        .setProps(new HashMap<>() {
+            {
+                put(MANUAL_COMPACTION, true);
+                put(COMPACT_MIN_TOMBSTONE_KEYS, 2500);
+                put(COMPACT_MIN_TOMBSTONE_RANGES, 2);
+            }
+        });
     @JsonSetter(nulls = Nulls.SKIP)
     @JsonMerge
-    private StorageEngineConfig walEngineConfig = new RocksDBEngineConfig()
-        .setManualCompaction(true)
-        .setCompactMinTombstoneKeys(2500)
-        .setCompactMinTombstoneRanges(2);
+    private EngineConfig walEngineConfig = new EngineConfig()
+        .setType("rocksdb")
+        .setProps(new HashMap<>() {
+            {
+                put(MANUAL_COMPACTION, true);
+                put(COMPACT_MIN_TOMBSTONE_KEYS, 2500);
+                put(COMPACT_MIN_TOMBSTONE_RANGES, 2);
+            }
+        });
     @JsonSetter(nulls = Nulls.SKIP)
     private BalancerOptions balanceConfig = new BalancerOptions();
+    @JsonSetter(nulls = Nulls.SKIP)
+    private SplitHinterOptions splitHinterConfig = new SplitHinterOptions();
     @JsonSetter(nulls = Nulls.SKIP)
     private Map<String, String> attributes = new HashMap<>();
 
@@ -65,5 +84,15 @@ public class DistWorkerConfig {
                 .putFields("votersPerRange", Value.newBuilder().setNumberValue(3).build())
                 .putFields("learnersPerRange", Value.newBuilder().setNumberValue(-1).build())
                 .build());
+
+        splitHinterConfig.getHinters().put("org.apache.bifromq.dist.worker.hinter.FanoutSplitHinterFactory",
+            Struct.newBuilder()
+                .putFields("splitThreshold", Value.newBuilder().setNumberValue(100000).build())
+                .build());
+        splitHinterConfig.getHinters()
+            .put("org.apache.bifromq.basekv.store.range.hinter.MutationKVLoadBasedSplitHinterFactory",
+                Struct.newBuilder()
+                    .putFields("windowSeconds", Value.newBuilder().setNumberValue(5).build())
+                    .build());
     }
 }

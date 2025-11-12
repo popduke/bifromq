@@ -14,13 +14,10 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.starter.module;
-
-import static org.apache.bifromq.starter.module.EngineConfUtil.buildDataEngineConf;
-import static org.apache.bifromq.starter.module.EngineConfUtil.buildWALEngineConf;
 
 import com.google.inject.AbstractModule;
 import com.google.inject.Inject;
@@ -50,7 +47,6 @@ import org.apache.bifromq.sessiondict.client.ISessionDictClient;
 import org.apache.bifromq.starter.config.StandaloneConfig;
 import org.apache.bifromq.starter.config.model.inbox.InboxServerConfig;
 import org.apache.bifromq.starter.config.model.inbox.InboxStoreConfig;
-import org.apache.bifromq.sysprops.props.InboxStoreLoadEstimationWindowSeconds;
 
 public class InboxServiceModule extends AbstractModule {
     @Override
@@ -123,7 +119,6 @@ public class InboxServiceModule extends AbstractModule {
                 .workerThreads(storeConfig.getWorkerThreads())
                 .bgTaskExecutor(
                     injector.getInstance(Key.get(ScheduledExecutorService.class, Names.named("bgTaskScheduler"))))
-                .loadEstimateWindow(Duration.ofSeconds(InboxStoreLoadEstimationWindowSeconds.INSTANCE.get()))
                 .expireRateLimit(storeConfig.getExpireRateLimit())
                 .gcInterval(
                     Duration.ofSeconds(storeConfig.getGcIntervalSeconds()))
@@ -136,11 +131,13 @@ public class InboxServiceModule extends AbstractModule {
                 .storeOptions(new KVRangeStoreOptions()
                     .setKvRangeOptions(new KVRangeOptions()
                         .setMaxWALFatchBatchSize(storeConfig.getMaxWALFetchSize())
-                        .setCompactWALThreshold(storeConfig
-                            .getCompactWALThreshold())
+                        .setCompactWALThreshold(storeConfig.getCompactWALThreshold())
                         .setEnableLoadEstimation(true))
-                    .setDataEngineConfigurator(buildDataEngineConf(storeConfig.getDataEngineConfig(), "inbox_data"))
-                    .setWalEngineConfigurator(buildWALEngineConf(storeConfig.getWalEngineConfig(), "inbox_wal")))
+                    .setSplitHinterFactoryConfig(storeConfig.getSplitHinterConfig().getHinters())
+                    .setDataEngineType(storeConfig.getDataEngineConfig().getType())
+                    .setDataEngineConf(storeConfig.getDataEngineConfig().toStruct())
+                    .setWalEngineType(storeConfig.getWalEngineConfig().getType())
+                    .setWalEngineConf(storeConfig.getWalEngineConfig().toStruct()))
                 .attributes(storeConfig.getAttributes())
                 .build());
         }

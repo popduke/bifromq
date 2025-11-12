@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.basescheduler.spi;
@@ -27,7 +27,15 @@ public interface ICapacityEstimatorFactory {
      * The factory method to create an instance of {@link ICapacityEstimator}.
      *
      * @param name the name of scheduler
+     * @param batcherKey the key of the batcher
      * @return an instance of {@link ICapacityEstimator}
      */
-    ICapacityEstimator create(String name);
+    <BatcherKey> ICapacityEstimator<BatcherKey> get(String name, BatcherKey batcherKey);
+
+    /**
+     * Close the factory.
+     */
+    default void close() {
+
+    }
 }

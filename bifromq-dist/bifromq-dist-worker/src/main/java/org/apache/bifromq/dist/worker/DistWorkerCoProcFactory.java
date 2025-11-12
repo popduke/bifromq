@@ -22,9 +22,6 @@ package org.apache.bifromq.dist.worker;
 import com.google.common.util.concurrent.MoreExecutors;
 import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
-import java.time.Duration;
-import java.util.List;
-import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinWorkerThread;
@@ -33,17 +30,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bifromq.basekv.proto.KVRangeId;
-import org.apache.bifromq.basekv.store.api.IKVCloseableReader;
 import org.apache.bifromq.basekv.store.api.IKVRangeCoProc;
 import org.apache.bifromq.basekv.store.api.IKVRangeCoProcFactory;
-import org.apache.bifromq.basekv.store.api.IKVRangeSplitHinter;
-import org.apache.bifromq.basekv.store.range.hinter.MutationKVLoadBasedSplitHinter;
+import org.apache.bifromq.basekv.store.api.IKVRangeRefreshableReader;
 import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
 import org.apache.bifromq.deliverer.IMessageDeliverer;
 import org.apache.bifromq.dist.client.IDistClient;
 import org.apache.bifromq.dist.worker.cache.ISubscriptionCache;
 import org.apache.bifromq.dist.worker.cache.SubscriptionCache;
-import org.apache.bifromq.dist.worker.hinter.FanoutSplitHinter;
 import org.apache.bifromq.plugin.eventcollector.IEventCollector;
 import org.apache.bifromq.plugin.resourcethrottler.IResourceThrottler;
 import org.apache.bifromq.plugin.settingprovider.ISettingProvider;
@@ -58,10 +52,8 @@ public class DistWorkerCoProcFactory implements IKVRangeCoProcFactory {
     private final ISettingProvider settingProvider;
     private final ISubscriptionCleaner subscriptionChecker;
     private final ExecutorService matchExecutor;
-    private final Duration loadEstWindow;
     private final int fanoutParallelism;
     private final int inlineFanOutThreshold;
-    private final int fanoutSplitThreshold;
 
     public DistWorkerCoProcFactory(IDistClient distClient,
                                    IEventCollector eventCollector,
@@ -69,17 +61,13 @@ public class DistWorkerCoProcFactory implements IKVRangeCoProcFactory {
                                    ISubBrokerManager subBrokerManager,
                                    IMessageDeliverer messageDeliverer,
                                    ISettingProvider settingProvider,
-                                   Duration loadEstimateWindow,
                                    int fanoutParallelism,
-                                   int inlineFanOutThreshold,
-                                   int fanoutSplitThreshold) {
+                                   int inlineFanOutThreshold) {
         this.eventCollector = eventCollector;
         this.resourceThrottler = resourceThrottler;
-        this.loadEstWindow = loadEstimateWindow;
         this.deliverer = messageDeliverer;
         this.settingProvider = settingProvider;
         this.fanoutParallelism = fanoutParallelism;
-        this.fanoutSplitThreshold = fanoutSplitThreshold;
         this.inlineFanOutThreshold = inlineFanOutThreshold;
         subscriptionChecker = new SubscriptionCleaner(subBrokerManager, distClient);
 
@@ -98,18 +86,8 @@ public class DistWorkerCoProcFactory implements IKVRangeCoProcFactory {
     }
 
     @Override
-    public List<IKVRangeSplitHinter> createHinters(String clusterId, String storeId, KVRangeId id,
-                                                   Supplier<IKVCloseableReader> readerProvider) {
-        return List.of(
-            new FanoutSplitHinter(readerProvider, fanoutSplitThreshold,
-                "clusterId", clusterId, "storeId", storeId, "rangeId", KVRangeIdUtil.toString(id)),
-            new MutationKVLoadBasedSplitHinter(loadEstWindow, Optional::of,
-                "clusterId", clusterId, "storeId", storeId, "rangeId", KVRangeIdUtil.toString(id)));
-    }
-
-    @Override
     public IKVRangeCoProc createCoProc(String clusterId, String storeId, KVRangeId id,
-                                       Supplier<IKVCloseableReader> rangeReaderProvider) {
+                                       Supplier<IKVRangeRefreshableReader> rangeReaderProvider) {
         ISubscriptionCache routeCache = new SubscriptionCache(id, rangeReaderProvider,
             settingProvider, eventCollector, matchExecutor);
         ITenantsStats tenantsState = new TenantsStats(rangeReaderProvider,

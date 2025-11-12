@@ -14,48 +14,31 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.basekv.store;
 
+import static com.google.protobuf.ByteString.copyFromUtf8;
+import static java.util.Collections.emptyMap;
+import static java.util.Collections.emptySet;
+import static org.apache.bifromq.basekv.localengine.StructUtil.toValue;
+import static org.apache.bifromq.basekv.localengine.rocksdb.RocksDBDefaultConfigs.DB_CHECKPOINT_ROOT_DIR;
+import static org.apache.bifromq.basekv.localengine.rocksdb.RocksDBDefaultConfigs.DB_ROOT_DIR;
 import static org.apache.bifromq.basekv.proto.State.StateType.Merged;
 import static org.apache.bifromq.basekv.proto.State.StateType.Normal;
 import static org.apache.bifromq.basekv.utils.BoundaryUtil.FULL_BOUNDARY;
 import static org.apache.bifromq.basekv.utils.BoundaryUtil.NULL_BOUNDARY;
 import static org.apache.bifromq.basekv.utils.BoundaryUtil.combine;
-import static com.google.protobuf.ByteString.copyFromUtf8;
-import static java.util.Collections.emptyMap;
-import static java.util.Collections.emptySet;
 import static org.awaitility.Awaitility.await;
 import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 import static org.testng.Assert.fail;
 
-import org.apache.bifromq.baseenv.EnvProvider;
-import org.apache.bifromq.basekv.MockableTest;
-import org.apache.bifromq.basekv.TestCoProcFactory;
-import org.apache.bifromq.basekv.localengine.rocksdb.RocksDBCPableKVEngineConfigurator;
-import org.apache.bifromq.basekv.localengine.rocksdb.RocksDBWALableKVEngineConfigurator;
-import org.apache.bifromq.basekv.proto.EnsureRange;
-import org.apache.bifromq.basekv.proto.KVRangeDescriptor;
-import org.apache.bifromq.basekv.proto.KVRangeId;
-import org.apache.bifromq.basekv.proto.KVRangeMessage;
-import org.apache.bifromq.basekv.proto.KVRangeSnapshot;
-import org.apache.bifromq.basekv.proto.KVRangeStoreDescriptor;
-import org.apache.bifromq.basekv.proto.State;
-import org.apache.bifromq.basekv.proto.StoreMessage;
-import org.apache.bifromq.basekv.raft.proto.ClusterConfig;
-import org.apache.bifromq.basekv.raft.proto.RaftNodeStatus;
-import org.apache.bifromq.basekv.raft.proto.Snapshot;
-import org.apache.bifromq.basekv.store.exception.KVRangeException;
-import org.apache.bifromq.basekv.store.option.KVRangeStoreOptions;
-import org.apache.bifromq.basekv.store.proto.ROCoProcInput;
-import org.apache.bifromq.basekv.store.proto.RWCoProcInput;
-import org.apache.bifromq.basekv.store.util.VerUtil;
-import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
+import com.google.common.collect.Sets;
 import com.google.protobuf.ByteString;
+import com.google.protobuf.Struct;
 import io.reactivex.rxjava3.core.Observable;
 import io.reactivex.rxjava3.subjects.PublishSubject;
 import java.io.File;
@@ -76,6 +59,26 @@ import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import lombok.SneakyThrows;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.bifromq.baseenv.EnvProvider;
+import org.apache.bifromq.basekv.MockableTest;
+import org.apache.bifromq.basekv.TestCoProcFactory;
+import org.apache.bifromq.basekv.proto.EnsureRange;
+import org.apache.bifromq.basekv.proto.KVRangeDescriptor;
+import org.apache.bifromq.basekv.proto.KVRangeId;
+import org.apache.bifromq.basekv.proto.KVRangeMessage;
+import org.apache.bifromq.basekv.proto.KVRangeSnapshot;
+import org.apache.bifromq.basekv.proto.KVRangeStoreDescriptor;
+import org.apache.bifromq.basekv.proto.State;
+import org.apache.bifromq.basekv.proto.StoreMessage;
+import org.apache.bifromq.basekv.raft.proto.ClusterConfig;
+import org.apache.bifromq.basekv.raft.proto.RaftNodeStatus;
+import org.apache.bifromq.basekv.raft.proto.Snapshot;
+import org.apache.bifromq.basekv.store.exception.KVRangeException;
+import org.apache.bifromq.basekv.store.option.KVRangeStoreOptions;
+import org.apache.bifromq.basekv.store.proto.ROCoProcInput;
+import org.apache.bifromq.basekv.store.proto.RWCoProcInput;
+import org.apache.bifromq.basekv.store.util.VerUtil;
+import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
 import org.testng.annotations.Test;
 
 @Slf4j
@@ -104,12 +107,18 @@ public class KVRangeStoreTest extends MockableTest {
             EnvProvider.INSTANCE.newThreadFactory("bg-task-executor"));
 
         dbRootDir = Files.createTempDirectory("");
-        (((RocksDBCPableKVEngineConfigurator) options.getDataEngineConfigurator()))
-            .dbCheckpointRootDir(Paths.get(dbRootDir.toString(), DB_CHECKPOINT_DIR_NAME)
-                .toString())
-            .dbRootDir(Paths.get(dbRootDir.toString(), DB_NAME).toString());
-        ((RocksDBWALableKVEngineConfigurator) options.getWalEngineConfigurator())
-            .dbRootDir(Paths.get(dbRootDir.toString(), DB_WAL_NAME).toString());
+        Struct dataConf = options.getDataEngineConf().toBuilder()
+            .putFields(DB_CHECKPOINT_ROOT_DIR,
+                toValue(Paths.get(dbRootDir.toString(), DB_CHECKPOINT_DIR_NAME).toString()))
+            .putFields(DB_ROOT_DIR, toValue(Paths.get(dbRootDir.toString(), DB_NAME).toString()))
+            .build();
+        options.setDataEngineType(options.getDataEngineType());
+        options.setDataEngineConf(dataConf);
+        Struct walConf = options.getWalEngineConf().toBuilder()
+            .putFields(DB_ROOT_DIR, toValue(Paths.get(dbRootDir.toString(), DB_WAL_NAME).toString()))
+            .build();
+        options.setWalEngineType(options.getWalEngineType());
+        options.setWalEngineConf(walConf);
 
         rangeStore =
             new KVRangeStore("testCluster",
@@ -476,12 +485,13 @@ public class KVRangeStoreTest extends MockableTest {
             }
         );
         log.info("{}", storeDescriptor);
-        KVRangeDescriptor merger = storeDescriptor.getRangesList().get(0).getId().equals(id) ?
-            storeDescriptor.getRangesList().get(0) : storeDescriptor.getRangesList().get(1);
-        KVRangeDescriptor mergee = storeDescriptor.getRangesList().get(1).getId().equals(id) ?
-            storeDescriptor.getRangesList().get(0) : storeDescriptor.getRangesList().get(1);
+        KVRangeDescriptor merger = storeDescriptor.getRangesList().get(0).getId().equals(id)
+            ? storeDescriptor.getRangesList().get(0) : storeDescriptor.getRangesList().get(1);
+        KVRangeDescriptor mergee = storeDescriptor.getRangesList().get(1).getId().equals(id)
+            ? storeDescriptor.getRangesList().get(0) : storeDescriptor.getRangesList().get(1);
         log.info("Start Merging");
-        rangeStore.merge(merger.getVer(), merger.getId(), mergee.getId()).toCompletableFuture().join();
+        rangeStore.merge(merger.getVer(), merger.getId(), mergee.getId(),
+            Sets.newHashSet(mergee.getConfig().getVotersList())).toCompletableFuture().join();
         KVRangeDescriptor mergeeDesc = await().atMost(Duration.ofSeconds(10000)).until(() ->
                 rangeStore.describe()
                     .flatMap(sd -> Observable.fromIterable(sd.getRangesList()))

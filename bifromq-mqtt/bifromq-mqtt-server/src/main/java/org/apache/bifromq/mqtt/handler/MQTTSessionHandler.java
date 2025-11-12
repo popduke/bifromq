@@ -19,9 +19,10 @@
 
 package org.apache.bifromq.mqtt.handler;
 
-import static java.lang.Math.round;
 import static java.util.concurrent.CompletableFuture.allOf;
+import static org.apache.bifromq.metrics.TenantMetric.MqttConfirmingMessages;
 import static org.apache.bifromq.metrics.TenantMetric.MqttConnectCount;
+import static org.apache.bifromq.metrics.TenantMetric.MqttDeDupBytes;
 import static org.apache.bifromq.metrics.TenantMetric.MqttDisconnectCount;
 import static org.apache.bifromq.metrics.TenantMetric.MqttIngressBytes;
 import static org.apache.bifromq.metrics.TenantMetric.MqttQoS0DistBytes;
@@ -34,6 +35,8 @@ import static org.apache.bifromq.metrics.TenantMetric.MqttQoS2DeliverBytes;
 import static org.apache.bifromq.metrics.TenantMetric.MqttQoS2DistBytes;
 import static org.apache.bifromq.metrics.TenantMetric.MqttQoS2ExternalLatency;
 import static org.apache.bifromq.metrics.TenantMetric.MqttQoS2IngressBytes;
+import static org.apache.bifromq.metrics.TenantMetric.MqttResendBytes;
+import static org.apache.bifromq.metrics.TenantMetric.MqttSendingQuota;
 import static org.apache.bifromq.mqtt.handler.IMQTTProtocolHelper.SubResult.EXCEED_LIMIT;
 import static org.apache.bifromq.mqtt.handler.MQTTSessionIdUtil.userSessionId;
 import static org.apache.bifromq.mqtt.handler.v5.MQTT5MessageUtils.messageExpiryInterval;
@@ -163,10 +166,7 @@ import org.apache.bifromq.util.UTF8Util;
 @Slf4j
 public abstract class MQTTSessionHandler extends MQTTMessageHandler implements IMQTTSession {
     protected static final boolean SANITY_CHECK = SanityCheckMqttUtf8String.INSTANCE.get();
-    private static final long ACK_FLOOR_NANOS = TimeUnit.MICROSECONDS.toNanos(200);
     private static final double EMA_APLHA = 0.15;
-    private static final double GAIN = 1.75;
-    private static final double SLOW_ACK_FACTOR = 4;
     private static final int REDIRECT_CHECK_INTERVAL_SECONDS = ClientRedirectCheckIntervalSeconds.INSTANCE.get();
     protected final TenantSettings settings;
     protected final String userSessionId;
@@ -189,6 +189,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     private final IMQTTMessageSizer sizer;
     private final LinkedHashMap<Integer, ConfirmingMessage> unconfirmedPacketIds = new LinkedHashMap<>();
     private final CompletableFuture<Void> onInitialized = new CompletableFuture<>();
+    private final CompletableFuture<Void> tearDownSignal = new CompletableFuture<>();
     private AdaptiveReceiveQuota receiveQuota;
     private LWT noDelayLWT;
     private boolean isGoAway;
@@ -241,9 +242,19 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     }
 
     @Override
-    public final CompletableFuture<Void> disconnect() {
-        ctx.executor().execute(() -> handleProtocolResponse(helper().onDisconnect()));
-        return bgTasks.whenComplete((v, e) -> log.trace("All bg tasks finished: client={}", clientInfo));
+    public final CompletableFuture<Void> onServerShuttingDown() {
+        ctx.executor().execute(() -> {
+            doOnServerShuttingDown();
+            if (settings.noLWTWhenServerShuttingDown) {
+                discardLWT();
+            }
+            handleProtocolResponse(helper().onServerShuttingDown());
+        });
+        return tearDownSignal;
+    }
+
+    protected void doOnServerShuttingDown() {
+
     }
 
     @Override
@@ -358,13 +369,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         ChannelAttrs.trafficShaper(ctx).setWriteLimit(settings.outboundBandwidth);
         ChannelAttrs.trafficShaper(ctx).setMaxWriteSize(settings.outboundBandwidth);
         ChannelAttrs.setMaxPayload(settings.maxPacketSize, ctx);
-        receiveQuota = new AdaptiveReceiveQuota(clientReceiveMaximum(),
-            ACK_FLOOR_NANOS,
-            EMA_APLHA,
-            GAIN,
-            SLOW_ACK_FACTOR,
-            settings.minSendPerSec,
-            clamp((int) round(clientReceiveMaximum() * 0.1), 4, 32));
+        receiveQuota = new AdaptiveReceiveQuota(settings.minSendPerSec, clientReceiveMaximum(), EMA_APLHA);
         sessionCtx.localSessionRegistry.add(channelId(), this);
         sessionRegistration = ChannelAttrs.mqttSessionContext(ctx).sessionDictClient
             .reg(clientInfo, (killer, redirection) -> {
@@ -385,15 +390,8 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         onInitialized.whenComplete((v, e) -> tenantMeter.recordCount(MqttConnectCount));
     }
 
-    private int clamp(int val, int min, int max) {
-        if (val < min) {
-            return min;
-        }
-        return Math.min(val, max);
-    }
-
     @Override
-    public void channelInactive(ChannelHandlerContext ctx) {
+    public final void channelInactive(ChannelHandlerContext ctx) {
         if (idleTimeoutTask != null) {
             idleTimeoutTask.cancel(true);
         }
@@ -407,6 +405,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             addBgTask(pubWillMessage(noDelayLWT));
         }
         Sets.newHashSet(fgTasks).forEach(t -> t.cancel(true));
+        doTearDown(ctx);
         sessionCtx.localSessionRegistry.remove(channelId(), this);
         sessionRegistration.stop();
         tenantMeter.recordCount(MqttDisconnectCount);
@@ -414,7 +413,14 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             isGoAway = true;
             eventCollector.report(getLocal(ByClient.class).withoutDisconnect(true).clientInfo(clientInfo));
         }
+        bgTasks.whenComplete((v, e) -> {
+            log.trace("All bg tasks finished: client={}", clientInfo);
+            tearDownSignal.complete(null);
+        });
+        ctx.fireChannelInactive();
     }
+
+    protected abstract void doTearDown(ChannelHandlerContext ctx);
 
     @Override
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
@@ -832,7 +838,10 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
 
     protected final int clientReceiveQuota() {
         assert receiveQuota != null;
-        return receiveQuota.availableQuota(sessionCtx.nanoTime(), unconfirmedPacketIds.size());
+        int quota = receiveQuota.availableQuota();
+        tenantMeter.recordSummary(MqttSendingQuota, quota);
+        tenantMeter.recordSummary(MqttConfirmingMessages, unconfirmedPacketIds.size());
+        return Math.max(0, quota - unconfirmedPacketIds.size());
     }
 
     private RoutedMessage confirm(int packetId, boolean delivered) {
@@ -858,12 +867,17 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                 packetIdItr.remove();
                 confirmingMsg = head;
                 long lastSentTimestamp = head.resendTimestamp > 0 ? head.resendTimestamp : head.timestamp;
-                receiveQuota.onPacketAcked(now, lastSentTimestamp);
                 RoutedMessage confirmed = confirmingMsg.message;
                 switch (confirmed.qos()) {
                     case AT_LEAST_ONCE -> {
-                        tenantMeter.timer(MqttQoS1ExternalLatency)
-                            .record(now - confirmingMsg.timestamp, TimeUnit.NANOSECONDS);
+                        // record external latency only when the message was actually sent
+                        if (delivered && lastSentTimestamp > 0) {
+                            // use inflight size before this ACK removal for proper AIMD increase
+                            int inflightAtAck = unconfirmedPacketIds.size() + 1;
+                            receiveQuota.onPacketAcked(now, lastSentTimestamp, inflightAtAck);
+                            tenantMeter.timer(MqttQoS1ExternalLatency)
+                                .record(now - lastSentTimestamp, TimeUnit.NANOSECONDS);
+                        }
                         if (settings.debugMode) {
                             eventCollector.report(getLocal(QoS1Confirmed.class)
                                 .reqId(confirmed.message().getMessageId())
@@ -878,8 +892,13 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                         }
                     }
                     case EXACTLY_ONCE -> {
-                        tenantMeter.timer(MqttQoS2ExternalLatency)
-                            .record(now - confirmingMsg.timestamp, TimeUnit.NANOSECONDS);
+                        // record external latency only when the message was actually sent
+                        if (delivered && lastSentTimestamp > 0) {
+                            int inflightAtAck = unconfirmedPacketIds.size() + 1;
+                            receiveQuota.onPacketAcked(now, lastSentTimestamp, inflightAtAck);
+                            tenantMeter.timer(MqttQoS2ExternalLatency)
+                                .record(now - lastSentTimestamp, TimeUnit.NANOSECONDS);
+                        }
                         if (!delivered && settings.debugMode) {
                             eventCollector.report(getLocal(QoS2Confirmed.class)
                                 .reqId(confirmed.message().getMessageId())
@@ -932,6 +951,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             return;
         }
         if (msg.isDup()) {
+            tenantMeter.recordSummary(MqttDeDupBytes, msgSize);
             eventCollector.report(getLocal(QoS0Dropped.class)
                 .reason(DropReason.Duplicated)
                 .isRetain(msg.isRetain())
@@ -1006,7 +1026,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             return;
         }
         memUsage.addAndGet(msgSize);
-        writeAndFlush(pubMsg).addListener(f -> {
+        write(pubMsg).addListener(f -> {
             memUsage.addAndGet(-msgSize);
             if (f.isSuccess()) {
                 lastActiveAtNanos = sessionCtx.nanoTime();
@@ -1063,6 +1083,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             return;
         }
         if (msg.isDup()) {
+            tenantMeter.recordSummary(MqttDeDupBytes, msgSize);
             reportDropConfirmableMsgEvent(msg, DropReason.Duplicated);
             ctx.executor().execute(() -> confirm(packetId, false));
             return;
@@ -1112,6 +1133,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             return;
         }
         if (!ctx.channel().isWritable()) {
+            receiveQuota.onErrorSignal(sessionCtx.nanoTime());
             if (resendTask != null) {
                 // will retry on next resend schedule
                 resendTask.cancel(true);
@@ -1123,9 +1145,10 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             confirmingMsg.timestamp = sessionCtx.nanoTime();
         } else {
             confirmingMsg.resendTimestamp = sessionCtx.nanoTime();
+            tenantMeter.recordSummary(MqttResendBytes, msgSize);
         }
         confirmingMsg.sentCount++;
-        writeAndFlush(pubMsg).addListener(f -> {
+        write(pubMsg).addListener(f -> {
             memUsage.addAndGet(-msgSize);
             if (f.isSuccess()) {
                 if (settings.debugMode) {
@@ -1156,6 +1179,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                     }
                 }
             } else {
+                receiveQuota.onErrorSignal(sessionCtx.nanoTime());
                 if (settings.debugMode) {
                     String detail = f.cause() == null ? "unknown" : f.cause().getMessage();
                     switch (msg.qos()) {
@@ -1218,26 +1242,34 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
 
     private void resend() {
         long now = sessionCtx.nanoTime();
+        boolean flush = false;
         for (ConfirmingMessage confirmingMsg : unconfirmedPacketIds.values()) {
             if (confirmingMsg.sentCount <= settings.maxResendTimes) {
                 if (ctx.channel().isWritable()) {
                     if (confirmingMsg.sentCount == 0) {
                         // first time send immediately
                         writeConfirmableSubMessage(confirmingMsg, false);
+                        flush = true;
                     } else {
                         long lastSendTs = Math.max(confirmingMsg.timestamp, confirmingMsg.resendTimestamp);
                         if (Duration.ofNanos(now - lastSendTs).toSeconds() >= settings.resendTimeoutSeconds) {
                             // only send after resend timeout
                             writeConfirmableSubMessage(confirmingMsg, true);
+                            flush = true;
                         }
                     }
                 } else {
+                    receiveQuota.onErrorSignal(now);
                     break;
                 }
             } else {
                 reportDropConfirmableMsgEvent(confirmingMsg.message, DropReason.MaxRetried);
                 confirm(confirmingMsg, false);
+                receiveQuota.onErrorSignal(now);
             }
+        }
+        if (flush) {
+            flush(true);
         }
         if (!unconfirmedPacketIds.isEmpty()) {
             scheduleResend();
@@ -1566,7 +1598,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             .build();
         long reqId = sessionCtx.nanoTime();
         int size = message.getPayload().size() + willMessage.getTopic().length();
-        return doPub(reqId, willMessage.getTopic(), message, true, true)
+        return doPub(reqId, willMessage.getTopic(), message, true)
             .handle((v, e) -> {
                 assert ctx.executor().inEventLoop();
                 if (e != null) {
@@ -1611,7 +1643,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                                                Message message,
                                                boolean isDup,
                                                int ingressMsgSize) {
-        return doPub(reqId, topic, message, false, false)
+        return doPub(reqId, topic, message, false)
             .thenApply(v -> {
                 assert ctx.executor().inEventLoop();
                 switch (v) {
@@ -1661,24 +1693,20 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             });
     }
 
-    private CompletableFuture<PubResult> doPub(long reqId,
-                                               String topic,
-                                               Message message,
-                                               boolean isLWT,
-                                               boolean background) {
+    private CompletableFuture<PubResult> doPub(long reqId, String topic, Message message, boolean isLWT) {
         if (log.isTraceEnabled()) {
             log.trace("Disting msg: req={}, topic={}, qos={}, size={}",
                 reqId, topic, message.getPubQoS(), message.getPayload().size());
         }
 
         CompletableFuture<PubResult> distTask =
-            trackTask(sessionCtx.distClient.pub(reqId, topic, message, clientInfo), background);
+            trackTask(sessionCtx.distClient.pub(reqId, topic, message, clientInfo), isLWT);
         if (!message.getIsRetain()) {
             // Ensure continuation runs on the channel event loop
             return distTask.thenApplyAsync(v -> v, ctx.executor());
         } else {
             CompletableFuture<RetainReply.Result> retainTask =
-                trackTask(retainMessage(reqId, topic, message, isLWT), background);
+                trackTask(retainMessage(reqId, topic, message, isLWT), isLWT);
             return allOf(retainTask, distTask).thenApplyAsync(v -> distTask.join(), ctx.executor());
         }
     }

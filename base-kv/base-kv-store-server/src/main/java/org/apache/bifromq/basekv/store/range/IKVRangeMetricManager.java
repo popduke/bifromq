@@ -14,21 +14,21 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.basekv.store.range;
 
-import org.apache.bifromq.basekv.proto.KVRangeDescriptor;
-import org.apache.bifromq.basekv.store.proto.ROCoProcOutput;
-import org.apache.bifromq.basekv.store.proto.RWCoProcOutput;
 import com.google.protobuf.ByteString;
 import io.micrometer.core.instrument.Timer;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Supplier;
+import org.apache.bifromq.basekv.proto.KVRangeDescriptor;
+import org.apache.bifromq.basekv.store.proto.ROCoProcOutput;
+import org.apache.bifromq.basekv.store.proto.RWCoProcOutput;
 
-public interface IKVRangeMetricManager {
+interface IKVRangeMetricManager {
     void report(KVRangeDescriptor descriptor);
 
     void reportDump(int bytes);
@@ -58,6 +58,8 @@ public interface IKVRangeMetricManager {
     CompletableFuture<Optional<ByteString>> recordGet(Supplier<CompletableFuture<Optional<ByteString>>> supplier);
 
     CompletableFuture<ROCoProcOutput> recordQueryCoProc(Supplier<CompletableFuture<ROCoProcOutput>> supplier);
+
+    CompletableFuture<Void> recordLinearization(Supplier<CompletableFuture<Void>> supplier);
 
     CompletableFuture<Void> recordCompact(Supplier<CompletableFuture<Void>> supplier);
 

@@ -24,6 +24,7 @@ import io.micrometer.core.instrument.Metrics;
 import io.micrometer.core.instrument.Tags;
 import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
 import io.reactivex.rxjava3.disposables.Disposable;
+import io.reactivex.rxjava3.schedulers.Schedulers;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -36,10 +37,13 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.bifromq.base.util.AsyncRunner;
 import org.apache.bifromq.baseenv.EnvProvider;
 import org.apache.bifromq.basekv.proto.KVPair;
+import org.apache.bifromq.basekv.proto.KVRangeId;
 import org.apache.bifromq.basekv.proto.KVRangeMessage;
+import org.apache.bifromq.basekv.proto.KVRangeSnapshot;
 import org.apache.bifromq.basekv.proto.SaveSnapshotDataReply;
 import org.apache.bifromq.basekv.proto.SaveSnapshotDataRequest;
-import org.apache.bifromq.basekv.proto.SnapshotSyncRequest;
+import org.apache.bifromq.basekv.store.api.IKVIterator;
+import org.apache.bifromq.basekv.store.api.IKVRangeReader;
 import org.apache.bifromq.logger.MDCLogger;
 import org.slf4j.Logger;
 
@@ -49,8 +53,10 @@ class KVRangeDumpSession {
     private static final double TARGET_ROUND_TRIP_NANOS = Duration.ofMillis(70).toNanos();
     private static final double EMA_ALPHA = 0.2d;
     private final Logger log;
-    private final String follower;
-    private final SnapshotSyncRequest request;
+    private final String sessionId;
+    private final KVRangeSnapshot snapshot;
+    private final KVRangeId receiverRangeId;
+    private final String receiverStoreId;
     private final IKVRangeMessenger messenger;
     private final ExecutorService executor;
     private final AsyncRunner runner;
@@ -61,18 +67,21 @@ class KVRangeDumpSession {
     private final DumpBytesRecorder recorder;
     private final SnapshotBandwidthGovernor bandwidthGovernor;
     private final long startDumpTS = System.nanoTime();
-    private IKVCheckpointIterator snapshotDataItr;
+    private IKVRangeReader snapshotReader;
+    private IKVIterator snapshotDataItr;
     private long totalEntries = 0;
     private long totalBytes = 0;
+    private long lastSendTS;
+    private double buildTimeEwma = TARGET_ROUND_TRIP_NANOS;
+    private double roundTripEwma = TARGET_ROUND_TRIP_NANOS;
+    private int chunkHint;
     private volatile KVRangeMessage currentRequest;
     private volatile long lastReplyTS;
-    private volatile long lastSendTS;
-    private volatile double buildTimeEwma = TARGET_ROUND_TRIP_NANOS;
-    private volatile double roundTripEwma = TARGET_ROUND_TRIP_NANOS;
-    private volatile int chunkHint;
 
-    KVRangeDumpSession(String follower,
-                       SnapshotSyncRequest request,
+    KVRangeDumpSession(String sessionId,
+                       KVRangeSnapshot snapshot,
+                       KVRangeId receiverRangeId,
+                       String receiverStoreId,
                        IKVRange accessor,
                        IKVRangeMessenger messenger,
                        Duration maxIdleDuration,
@@ -80,8 +89,10 @@ class KVRangeDumpSession {
                        SnapshotBandwidthGovernor bandwidthGovernor,
                        DumpBytesRecorder recorder,
                        String... tags) {
-        this.follower = follower;
-        this.request = request;
+        this.sessionId = sessionId;
+        this.snapshot = snapshot;
+        this.receiverRangeId = receiverRangeId;
+        this.receiverStoreId = receiverStoreId;
         this.messenger = messenger;
         this.executor = ExecutorServiceMetrics.monitor(Metrics.globalRegistry,
             new ThreadPoolExecutor(1, 1,
@@ -94,43 +105,46 @@ class KVRangeDumpSession {
         this.bandwidthGovernor = bandwidthGovernor;
         this.chunkHint = initialChunkHint(bandwidth);
         this.log = MDCLogger.getLogger(KVRangeDumpSession.class, tags);
-        if (!request.getSnapshot().hasCheckpointId()) {
+        if (!snapshot.hasCheckpointId()) {
             messenger.send(KVRangeMessage.newBuilder()
-                .setRangeId(request.getSnapshot().getId())
-                .setHostStoreId(follower)
+                .setRangeId(receiverRangeId)
+                .setHostStoreId(receiverStoreId)
                 .setSaveSnapshotDataRequest(SaveSnapshotDataRequest.newBuilder()
-                    .setSessionId(request.getSessionId())
+                    .setSessionId(sessionId)
                     .setFlag(SaveSnapshotDataRequest.Flag.End)
                     .build())
                 .build());
             executor.execute(() -> doneSignal.complete(Result.OK));
-        } else if (!accessor.hasCheckpoint(request.getSnapshot())) {
-            log.warn("No checkpoint found for snapshot: {}", request.getSnapshot());
+        } else if (!accessor.hasCheckpoint(snapshot)) {
+            log.warn("No checkpoint found for snapshot: {}", snapshot);
             messenger.send(KVRangeMessage.newBuilder()
-                .setRangeId(request.getSnapshot().getId())
-                .setHostStoreId(follower)
+                .setRangeId(receiverRangeId)
+                .setHostStoreId(receiverStoreId)
                 .setSaveSnapshotDataRequest(SaveSnapshotDataRequest.newBuilder()
-                    .setSessionId(request.getSessionId())
-                    .setFlag(SaveSnapshotDataRequest.Flag.Error)
+                    .setSessionId(sessionId)
+                    .setFlag(SaveSnapshotDataRequest.Flag.NotFound)
                     .build())
                 .build());
             executor.execute(() -> doneSignal.complete(Result.NoCheckpoint));
         } else {
-            snapshotDataItr = accessor.open(request.getSnapshot()).newDataReader().iterator();
+            snapshotReader = accessor.open(snapshot);
+            snapshotDataItr = snapshotReader.iterator();
             snapshotDataItr.seekToFirst();
             Disposable disposable = messenger.receive()
                 .mapOptional(m -> {
                     if (m.hasSaveSnapshotDataReply()) {
                         SaveSnapshotDataReply reply = m.getSaveSnapshotDataReply();
-                        if (reply.getSessionId().equals(request.getSessionId())) {
+                        if (reply.getSessionId().equals(sessionId)) {
                             return Optional.of(reply);
                         }
                     }
                     return Optional.empty();
                 })
+                .observeOn(Schedulers.from(executor))
                 .subscribe(this::handleReply);
             doneSignal.whenComplete((v, e) -> {
                 snapshotDataItr.close();
+                snapshotReader.close();
                 disposable.dispose();
             });
             nextSaveRequest();
@@ -138,11 +152,11 @@ class KVRangeDumpSession {
     }
 
     String id() {
-        return request.getSessionId();
+        return sessionId;
     }
 
     String checkpointId() {
-        return request.getSnapshot().getCheckpointId();
+        return snapshot.getCheckpointId();
     }
 
     void tick() {
@@ -151,7 +165,7 @@ class KVRangeDumpSession {
         }
         long elapseNanos = Duration.ofNanos(System.nanoTime() - lastReplyTS).toNanos();
         if (maxIdleDuration.toNanos() < elapseNanos) {
-            log.debug("DumpSession idle: session={}, follower={}", request.getSessionId(), follower);
+            log.debug("DumpSession idle: session={}, follower={}", sessionId, receiverStoreId);
             cancel();
         } else if (maxIdleDuration.toNanos() / 2 < elapseNanos && currentRequest != null) {
             runner.add(() -> {
@@ -164,6 +178,14 @@ class KVRangeDumpSession {
 
     void cancel() {
         if (canceled.compareAndSet(false, true)) {
+            messenger.send(KVRangeMessage.newBuilder()
+                .setRangeId(receiverRangeId)
+                .setHostStoreId(receiverStoreId)
+                .setSaveSnapshotDataRequest(SaveSnapshotDataRequest.newBuilder()
+                    .setSessionId(sessionId)
+                    .setFlag(SaveSnapshotDataRequest.Flag.Error)
+                    .build())
+                .build());
             runner.add(() -> doneSignal.complete(Result.Canceled));
         }
     }
@@ -206,7 +228,7 @@ class KVRangeDumpSession {
     private void nextSaveRequest() {
         runner.add(() -> {
             SaveSnapshotDataRequest.Builder reqBuilder = SaveSnapshotDataRequest.newBuilder()
-                .setSessionId(request.getSessionId())
+                .setSessionId(sessionId)
                 .setReqId(reqId.getAndIncrement());
             long buildStart = System.nanoTime();
             int dumpEntries = 0;
@@ -235,13 +257,13 @@ class KVRangeDumpSession {
                         snapshotDataItr.next();
                     }
                 } catch (Throwable e) {
-                    log.error("DumpSession error: session={}, follower={}", request.getSessionId(), follower, e);
+                    log.error("DumpSession error: session={}, follower={}", sessionId, receiverStoreId, e);
                     reqBuilder.clearKv();
                     reqBuilder.setFlag(SaveSnapshotDataRequest.Flag.Error);
                 }
             }
             if (canceled.get() && reqBuilder.getFlag() != SaveSnapshotDataRequest.Flag.Error) {
-                log.debug("DumpSession has been canceled: session={}, follower={}", request.getSessionId(), follower);
+                log.debug("DumpSession has been canceled: session={}, follower={}", sessionId, receiverStoreId);
                 reqBuilder.clearKv();
                 reqBuilder.setFlag(SaveSnapshotDataRequest.Flag.Error);
             }
@@ -264,8 +286,8 @@ class KVRangeDumpSession {
                 adjustChunkHint(buildCost);
             }
             currentRequest = KVRangeMessage.newBuilder()
-                .setRangeId(request.getSnapshot().getId())
-                .setHostStoreId(follower)
+                .setRangeId(receiverRangeId)
+                .setHostStoreId(receiverStoreId)
                 .setSaveSnapshotDataRequest(reqBuilder.build())
                 .build();
             long now = System.nanoTime();
@@ -277,11 +299,11 @@ class KVRangeDumpSession {
             if (reqBuilder.getFlag() == SaveSnapshotDataRequest.Flag.End) {
                 log.info(
                     "Dump snapshot completed: sessionId={}, follower={}, totalEntries={}, totalBytes={}, cost={}ms",
-                    request.getSessionId(), follower, totalEntries, totalBytes,
+                    sessionId, receiverStoreId, totalEntries, totalBytes,
                     TimeUnit.NANOSECONDS.toMillis(now - startDumpTS));
             } else {
                 log.info("Dump snapshot data: sessionId={}, follower={}, entries={}, bytes={}",
-                    request.getSessionId(), follower, reqBuilder.getKvCount(), dumpBytes);
+                    sessionId, receiverStoreId, reqBuilder.getKvCount(), dumpBytes);
             }
             messenger.send(currentRequest);
             if (currentRequest.getSaveSnapshotDataRequest().getFlag() == SaveSnapshotDataRequest.Flag.Error) {

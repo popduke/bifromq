@@ -40,7 +40,7 @@ public class KVRangeOptions {
     @Builder.Default
     private int snapshotSyncBytesPerSec = 128 * 1024 * 1024; // 128MB
     @Builder.Default
-    private int compactWALThreshold = 10000; // the max number of logs before compaction
+    private int compactWALThreshold = 256 * 1024 * 1024; // the max log bytes before compaction
     @Builder.Default
     private int shrinkWALCheckIntervalSec = 60;
     @Builder.Default
@@ -53,6 +53,8 @@ public class KVRangeOptions {
     private int statsCollectIntervalSec = 5;
     @Builder.Default
     private int zombieTimeoutSec = 60; // 1min
+    @Builder.Default
+    private int mergeTimeoutSec = 60; // 1min
     @Builder.Default
     private RaftConfig walRaftConfig = new RaftConfig()
         .setPreVote(true)

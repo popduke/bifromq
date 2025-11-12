@@ -19,9 +19,6 @@
 
 package org.apache.bifromq.starter.module;
 
-import static org.apache.bifromq.starter.module.EngineConfUtil.buildDataEngineConf;
-import static org.apache.bifromq.starter.module.EngineConfUtil.buildWALEngineConf;
-
 import com.google.inject.AbstractModule;
 import com.google.inject.Inject;
 import com.google.inject.Key;
@@ -48,7 +45,6 @@ import org.apache.bifromq.plugin.subbroker.ISubBrokerManager;
 import org.apache.bifromq.starter.config.StandaloneConfig;
 import org.apache.bifromq.starter.config.model.dist.DistServerConfig;
 import org.apache.bifromq.starter.config.model.dist.DistWorkerConfig;
-import org.apache.bifromq.sysprops.props.DistWorkerLoadEstimationWindowSeconds;
 
 public class DistServiceModule extends AbstractModule {
     @Override
@@ -122,10 +118,11 @@ public class DistServiceModule extends AbstractModule {
                     .setKvRangeOptions(new KVRangeOptions()
                         .setMaxWALFatchBatchSize(workerConfig.getMaxWALFetchSize())
                         .setCompactWALThreshold(workerConfig.getCompactWALThreshold()))
-                    .setDataEngineConfigurator(buildDataEngineConf(workerConfig
-                        .getDataEngineConfig(), "dist_data"))
-                    .setWalEngineConfigurator(buildWALEngineConf(workerConfig
-                        .getWalEngineConfig(), "dist_wal")))
+                    .setSplitHinterFactoryConfig(workerConfig.getSplitHinterConfig().getHinters())
+                    .setDataEngineType(workerConfig.getDataEngineConfig().getType())
+                    .setDataEngineConf(workerConfig.getDataEngineConfig().toStruct())
+                    .setWalEngineType(workerConfig.getWalEngineConfig().getType())
+                    .setWalEngineConf(workerConfig.getWalEngineConfig().toStruct()))
                 .minGCInterval(Duration.ofSeconds(workerConfig.getMinGCIntervalSeconds()))
                 .maxGCInterval(Duration.ofSeconds(workerConfig.getMaxGCIntervalSeconds()))
                 .bootstrapDelay(Duration.ofMillis(workerConfig.getBalanceConfig().getBootstrapDelayInMS()))
@@ -134,7 +131,6 @@ public class DistServiceModule extends AbstractModule {
                 .balancerFactoryConfig(workerConfig.getBalanceConfig().getBalancers())
                 .subBrokerManager(injector.getInstance(ISubBrokerManager.class))
                 .settingProvider(injector.getInstance(SettingProviderManager.class))
-                .loadEstimateWindow(Duration.ofSeconds(DistWorkerLoadEstimationWindowSeconds.INSTANCE.get()))
                 .attributes(workerConfig.getAttributes())
                 .build());
         }

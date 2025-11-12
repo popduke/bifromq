@@ -14,7 +14,7 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.inbox.server;
@@ -22,10 +22,22 @@ package org.apache.bifromq.inbox.server;
 import static org.apache.bifromq.inbox.server.Fixtures.matchInfo;
 import static org.apache.bifromq.inbox.server.Fixtures.sendRequest;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.when;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertFalse;
 
+import io.grpc.Context;
+import io.grpc.stub.ServerCallStreamObserver;
+import io.micrometer.core.instrument.Timer;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+import lombok.SneakyThrows;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.bifromq.baseenv.MemUsage;
 import org.apache.bifromq.baserpc.RPCContext;
 import org.apache.bifromq.baserpc.metrics.IRPCMeter;
@@ -38,15 +50,6 @@ import org.apache.bifromq.plugin.subbroker.DeliveryResult;
 import org.apache.bifromq.plugin.subbroker.DeliveryResults;
 import org.apache.bifromq.sysprops.props.IngressSlowDownDirectMemoryUsage;
 import org.apache.bifromq.sysprops.props.IngressSlowDownHeapMemoryUsage;
-import io.grpc.Context;
-import io.grpc.stub.ServerCallStreamObserver;
-import io.micrometer.core.instrument.Timer;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import lombok.SneakyThrows;
-import lombok.extern.slf4j.Slf4j;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -123,7 +126,7 @@ public class InboxWriterPipelineTest {
         SendReply mockSendReply = SendReply.newBuilder().setReqId(1)
             .setReply(DeliveryReply.newBuilder().setCode(DeliveryReply.Code.ERROR).build()).build();
         when(inboxWriter.handle(any())).thenReturn(CompletableFuture.completedFuture(mockSendReply));
-        doNothing().when(fetcherSignaler).afterWrite(any(), any());
+        doNothing().when(fetcherSignaler).afterWrite(any(), any(), anyLong());
         InboxWriterPipeline writerPipeline = new InboxWriterPipeline(fetcherSignaler, inboxWriter, responseObserver);
         SendReply sendReply = writerPipeline.handleRequest("_", sendRequest()).join();
         assertEquals(sendReply, mockSendReply);
@@ -132,7 +135,7 @@ public class InboxWriterPipelineTest {
     private void testHandleRequest(DeliveryResult.Code code) {
         SendReply mockSendReply = createSendReply(code);
         when(inboxWriter.handle(any())).thenReturn(CompletableFuture.completedFuture(mockSendReply));
-        doNothing().when(fetcherSignaler).afterWrite(any(), any());
+        doNothing().when(fetcherSignaler).afterWrite(any(), any(), anyLong());
         InboxWriterPipeline writerPipeline = new InboxWriterPipeline(fetcherSignaler, inboxWriter, responseObserver);
         SendReply sendReply = writerPipeline.handleRequest("_", sendRequest()).join();
         assertEquals(sendReply, mockSendReply);
@@ -168,7 +171,7 @@ public class InboxWriterPipelineTest {
 
     private void testMemoryUsageThresholdExceed() {
         when(inboxWriter.handle(any())).thenReturn(CompletableFuture.completedFuture(SendReply.getDefaultInstance()));
-        doNothing().when(fetcherSignaler).afterWrite(any(), any());
+        doNothing().when(fetcherSignaler).afterWrite(any(), any(), anyLong());
         try (MockedStatic<MemUsage> mocked = Mockito.mockStatic(MemUsage.class)) {
             mocked.when(MemUsage::local).thenReturn(memUsage);
             SendRequest sendRequest = SendRequest.getDefaultInstance();
@@ -178,6 +181,33 @@ public class InboxWriterPipelineTest {
             SendReply sendReply = writerPipeline.handleRequest("_", sendRequest).join();
             assertEquals(sendReply, SendReply.getDefaultInstance());
         }
+    }
+
+    @Test
+    public void testFIFOResponseOrder() throws Exception {
+        CompletableFuture<SendReply> f1 = new CompletableFuture<>();
+        CompletableFuture<SendReply> f2 = new CompletableFuture<>();
+
+        when(inboxWriter.handle(any())).thenReturn(f1).thenReturn(f2);
+        doNothing().when(fetcherSignaler).afterWrite(any(), any(), anyLong());
+
+        InboxWriterPipeline writerPipeline = new InboxWriterPipeline(fetcherSignaler, inboxWriter, responseObserver);
+
+        CompletableFuture<SendReply> r1 = writerPipeline.handleRequest("_", sendRequest());
+        CompletableFuture<SendReply> r2 = writerPipeline.handleRequest("_", sendRequest());
+
+        SendReply reply2 = SendReply.newBuilder().setReqId(2)
+            .setReply(DeliveryReply.newBuilder().setCode(DeliveryReply.Code.OK).build()).build();
+        f2.complete(reply2);
+
+        assertFalse(r2.isDone());
+
+        SendReply reply1 = SendReply.newBuilder().setReqId(1)
+            .setReply(DeliveryReply.newBuilder().setCode(DeliveryReply.Code.OK).build()).build();
+        f1.complete(reply1);
+
+        assertEquals(reply1, r1.get(3, TimeUnit.SECONDS));
+        assertEquals(reply2, r2.get(3, TimeUnit.SECONDS));
     }
 
 }

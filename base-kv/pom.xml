@@ -35,12 +35,16 @@
         <module>base-kv-type-proto</module>
         <module>base-kv-raft-type</module>
         <module>base-kv-raft</module>
-        <module>base-kv-local-engine</module>
+        <module>base-kv-local-engine-spi</module>
+        <module>base-kv-local-engine-rocksdb</module>
+        <module>base-kv-local-engine-memory</module>
         <module>base-kv-store-rpc-definition</module>
         <module>base-kv-store-client</module>
+        <module>base-kv-store-coproc-api</module>
         <module>base-kv-store-server</module>
         <module>base-kv-store-balance-controller</module>
         <module>base-kv-store-balance-spi</module>
+        <module>base-kv-split-hinter-spi</module>
         <module>base-kv-meta-service</module>
     </modules>
 </project>

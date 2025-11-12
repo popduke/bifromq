@@ -14,13 +14,10 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.starter.module;
-
-import static org.apache.bifromq.starter.module.EngineConfUtil.buildDataEngineConf;
-import static org.apache.bifromq.starter.module.EngineConfUtil.buildWALEngineConf;
 
 import com.google.inject.AbstractModule;
 import com.google.inject.Inject;
@@ -46,7 +43,6 @@ import org.apache.bifromq.retain.store.IRetainStore;
 import org.apache.bifromq.starter.config.StandaloneConfig;
 import org.apache.bifromq.starter.config.model.retain.RetainServerConfig;
 import org.apache.bifromq.starter.config.model.retain.RetainStoreConfig;
-import org.apache.bifromq.sysprops.props.RetainStoreLoadEstimationWindowSeconds;
 
 public class RetainServiceModule extends AbstractModule {
     @Override
@@ -118,14 +114,16 @@ public class RetainServiceModule extends AbstractModule {
                 .zombieProbeDelay(Duration.ofMillis(storeConfig.getBalanceConfig().getZombieProbeDelayInMS()))
                 .balancerRetryDelay(Duration.ofMillis(storeConfig.getBalanceConfig().getRetryDelayInMS()))
                 .balancerFactoryConfig(storeConfig.getBalanceConfig().getBalancers())
-                .loadEstimateWindow(Duration.ofSeconds(RetainStoreLoadEstimationWindowSeconds.INSTANCE.get()))
                 .gcInterval(Duration.ofSeconds(storeConfig.getGcIntervalSeconds()))
                 .storeOptions(new KVRangeStoreOptions()
                     .setKvRangeOptions(new KVRangeOptions()
                         .setMaxWALFatchBatchSize(storeConfig.getMaxWALFetchSize())
                         .setCompactWALThreshold(storeConfig.getCompactWALThreshold()))
-                    .setDataEngineConfigurator(buildDataEngineConf(storeConfig.getDataEngineConfig(), "retain_data"))
-                    .setWalEngineConfigurator(buildWALEngineConf(storeConfig.getWalEngineConfig(), "retain_wal")))
+                    .setSplitHinterFactoryConfig(storeConfig.getSplitHinterConfig().getHinters())
+                    .setDataEngineType(storeConfig.getDataEngineConfig().getType())
+                    .setDataEngineConf(storeConfig.getDataEngineConfig().toStruct())
+                    .setWalEngineType(storeConfig.getWalEngineConfig().getType())
+                    .setWalEngineConf(storeConfig.getWalEngineConfig().toStruct()))
                 .attributes(storeConfig.getAttributes())
                 .build());
         }

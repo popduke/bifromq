@@ -57,6 +57,11 @@ public enum TenantMetric {
     MqttTransientFanOutBytes("mqtt.tfanout.bytes", Meter.Type.DISTRIBUTION_SUMMARY),
     MqttPersistentFanOutBytes("mqtt.pfanout.bytes", Meter.Type.DISTRIBUTION_SUMMARY),
 
+    MqttSendingQuota("mqtt.ex.quota", Meter.Type.DISTRIBUTION_SUMMARY),
+    MqttConfirmingMessages("mqtt.ex.confirming", Meter.Type.DISTRIBUTION_SUMMARY),
+    MqttResendBytes("mqtt.ex.resend.bytes", Meter.Type.DISTRIBUTION_SUMMARY),
+    MqttDeDupBytes("mqtt.ex.dedup.bytes", Meter.Type.DISTRIBUTION_SUMMARY),
+
     // subscription related metrics
     MqttRouteSpaceGauge("mqtt.route.space.gauge", Meter.Type.GAUGE),
     MqttRouteNumGauge("mqtt.route.num.gauge", Meter.Type.GAUGE),

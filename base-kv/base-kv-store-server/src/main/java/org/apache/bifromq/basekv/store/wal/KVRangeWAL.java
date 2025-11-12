@@ -26,14 +26,12 @@ import com.google.protobuf.ByteString;
 import io.reactivex.rxjava3.core.Observable;
 import io.reactivex.rxjava3.subjects.BehaviorSubject;
 import io.reactivex.rxjava3.subjects.PublishSubject;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import lombok.SneakyThrows;
 import org.apache.bifromq.baseenv.EnvProvider;
@@ -41,6 +39,7 @@ import org.apache.bifromq.baseenv.ZeroCopyParser;
 import org.apache.bifromq.basekv.proto.KVRangeCommand;
 import org.apache.bifromq.basekv.proto.KVRangeId;
 import org.apache.bifromq.basekv.proto.KVRangeSnapshot;
+import org.apache.bifromq.basekv.raft.ILogEntryIterator;
 import org.apache.bifromq.basekv.raft.IRaftNode;
 import org.apache.bifromq.basekv.raft.RaftConfig;
 import org.apache.bifromq.basekv.raft.RaftNode;
@@ -75,7 +74,6 @@ public class KVRangeWAL implements IKVRangeWAL, IRaftNode.ISnapshotInstaller {
     private final String localId;
     private final IKVRangeWALStore walStore;
     private final IRaftNode raftNode;
-    private final AtomicLong ticks = new AtomicLong(0);
     private final String[] tags;
 
     public KVRangeWAL(String clusterId,
@@ -171,7 +169,7 @@ public class KVRangeWAL implements IKVRangeWAL, IRaftNode.ISnapshotInstaller {
                         return CompletableFuture.failedFuture(new KVRangeException("Canceled once"));
                     }
                 }, executor, tags);
-        onDone.whenCompleteAsync((v, e) -> walSub.stop(), executor);
+        onDone.exceptionally(e -> null).thenComposeAsync(v -> walSub.stop(), executor);
         return onDone;
     }
 
@@ -186,7 +184,7 @@ public class KVRangeWAL implements IKVRangeWAL, IRaftNode.ISnapshotInstaller {
     }
 
     @Override
-    public CompletableFuture<Iterator<LogEntry>> retrieveCommitted(long fromIndex, long maxSize) {
+    public CompletableFuture<ILogEntryIterator> retrieveCommitted(long fromIndex, long maxSize) {
         return raftNode.retrieveCommitted(fromIndex, maxSize);
     }
 
@@ -253,7 +251,6 @@ public class KVRangeWAL implements IKVRangeWAL, IRaftNode.ISnapshotInstaller {
 
     @Override
     public void tick() {
-        ticks.incrementAndGet();
         raftNode.tick();
     }
 
@@ -272,7 +269,12 @@ public class KVRangeWAL implements IKVRangeWAL, IRaftNode.ISnapshotInstaller {
         snapRestoreTaskPublisher.onComplete();
         electionPublisher.onComplete();
         syncStatePublisher.onComplete();
-        return raftNode.stop().whenComplete((v, e) -> log.debug("KVRangeWAL closed"));
+        return raftNode.stop()
+            .exceptionally(e -> {
+                log.error("Raft node stop error", e);
+                return null;
+            })
+            .whenComplete((v, e) -> log.debug("KVRangeWAL closed"));
     }
 
     @Override

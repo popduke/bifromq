@@ -14,40 +14,42 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.    
+ * under the License.
  */
 
 package org.apache.bifromq.basescheduler.spi;
 
 /**
- * SPI interface for estimating the capacity of a BatchCall pipeline.
+ * SPI interface for estimating downstream capacity.
  */
-public interface ICapacityEstimator {
+public interface ICapacityEstimator<BatcherKey> {
     /**
-     * Callback to record the latency of a batch call.
+     * Record the outcome of a batch call.
      *
-     * @param batchSize the size of the batch
-     * @param latencyNs the latency in nanoseconds
+     * @param weight the total weight of the batch
+     * @param latencyNs    the execution latency in nanoseconds
      */
-    void record(int batchSize, long latencyNs);
+    void record(long weight, long latencyNs);
 
     /**
-     * Get the maximum pipeline depth for the BatchCall pipeline.
+     * Determine if it's allowed to emit batch call for given batcher.
      *
-     * @return the maximum pipeline depth
+     * @param inflightWeight the inflight weight of batch call
+     * @param batcherKey the key of the batcher
+     * @return if it's allowed
      */
-    int maxPipelineDepth();
+    boolean hasCapacity(long inflightWeight, BatcherKey batcherKey);
 
     /**
-     * Get the maximum batch size for a batch.
+     * Get the current maximum allowed capacity in weighted size for given batcher.
      *
-     * @return the maximum batch size
+     * @param batcherKey the key of the batcher
+     * @return the capacity budget
      */
-    int maxBatchSize();
+    long maxCapacity(BatcherKey batcherKey);
 
     /**
-     * Close the call scheduler.
+     * Notify estimator that downstream backpressure has been observed.
      */
-    default void close() {
-    }
+    void onBackPressure();
 }

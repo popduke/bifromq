@@ -34,6 +34,7 @@ import static org.apache.bifromq.basekv.store.proto.BaseKVStoreServiceGrpc.getQu
 import static org.apache.bifromq.basekv.store.proto.BaseKVStoreServiceGrpc.getRecoverMethod;
 import static org.apache.bifromq.basekv.store.proto.BaseKVStoreServiceGrpc.getSplitMethod;
 import static org.apache.bifromq.basekv.store.proto.BaseKVStoreServiceGrpc.getTransferLeadershipMethod;
+import static org.apache.bifromq.basekv.store.proto.BaseKVStoreServiceGrpc.getZombieQuitMethod;
 import static org.apache.bifromq.basekv.utils.DescriptorUtil.getEffectiveEpoch;
 import static org.apache.bifromq.basekv.utils.DescriptorUtil.getRangeLeaders;
 
@@ -91,6 +92,8 @@ import org.apache.bifromq.basekv.store.proto.RecoverRequest;
 import org.apache.bifromq.basekv.store.proto.ReplyCode;
 import org.apache.bifromq.basekv.store.proto.TransferLeadershipReply;
 import org.apache.bifromq.basekv.store.proto.TransferLeadershipRequest;
+import org.apache.bifromq.basekv.store.proto.ZombieQuitReply;
+import org.apache.bifromq.basekv.store.proto.ZombieQuitRequest;
 import org.apache.bifromq.basekv.utils.BoundaryUtil;
 import org.apache.bifromq.basekv.utils.EffectiveEpoch;
 import org.apache.bifromq.basekv.utils.RangeLeader;
@@ -116,6 +119,7 @@ final class BaseKVStoreClient implements IBaseKVStoreClient {
     private final IBaseKVLandscapeObserver landscapeObserver;
     private final MethodDescriptor<BootstrapRequest, BootstrapReply> bootstrapMethod;
     private final MethodDescriptor<RecoverRequest, RecoverReply> recoverMethod;
+    private final MethodDescriptor<ZombieQuitRequest, ZombieQuitReply> zombieQuitMethod;
     private final MethodDescriptor<TransferLeadershipRequest, TransferLeadershipReply> transferLeadershipMethod;
     private final MethodDescriptor<ChangeReplicaConfigRequest, ChangeReplicaConfigReply> changeReplicaConfigMethod;
     private final MethodDescriptor<KVRangeSplitRequest, KVRangeSplitReply> splitMethod;
@@ -149,6 +153,8 @@ final class BaseKVStoreClient implements IBaseKVStoreClient {
             toScopedFullMethodName(clusterId, getBootstrapMethod().getFullMethodName()));
         this.recoverMethod =
             bluePrint.methodDesc(toScopedFullMethodName(clusterId, getRecoverMethod().getFullMethodName()));
+        this.zombieQuitMethod =
+            bluePrint.methodDesc(toScopedFullMethodName(clusterId, getZombieQuitMethod().getFullMethodName()));
         this.transferLeadershipMethod =
             bluePrint.methodDesc(toScopedFullMethodName(clusterId, getTransferLeadershipMethod().getFullMethodName()));
         this.changeReplicaConfigMethod =
@@ -232,6 +238,16 @@ final class BaseKVStoreClient implements IBaseKVStoreClient {
     }
 
     @Override
+    public CompletableFuture<ZombieQuitReply> zombieQuit(String storeId, ZombieQuitRequest request) {
+        String serverId = storeToServerMap.get(storeId);
+        if (serverId == null) {
+            return CompletableFuture.failedFuture(
+                new ServerNotFoundException("BaseKVStore Server not available for storeId: " + storeId));
+        }
+        return rpcClient.invoke("", serverId, request, zombieQuitMethod);
+    }
+
+    @Override
     public CompletableFuture<TransferLeadershipReply> transferLeadership(String storeId,
                                                                          TransferLeadershipRequest request) {
         String serverId = storeToServerMap.get(storeId);
@@ -271,12 +287,12 @@ final class BaseKVStoreClient implements IBaseKVStoreClient {
                     .setCode(ReplyCode.InternalError)
                     .build();
             })
-            .thenApplyAsync(v -> {
+            .thenApply(v -> {
                 if (v.hasLatest()) {
                     patchRouter(storeId, v.getLatest());
                 }
                 return v;
-            }, CLIENT_EXECUTOR);
+            });
     }
 
     @Override
@@ -400,7 +416,7 @@ final class BaseKVStoreClient implements IBaseKVStoreClient {
                     };
                 }
                 return rpcClient.createRequestPipeline("", serverIdOpt.get(), null, emptyMap(), executeMethod);
-            }), latest -> patchRouter(storeId, latest), CLIENT_EXECUTOR, log);
+            }), latest -> patchRouter(storeId, latest), log);
     }
 
     @Override
@@ -444,7 +460,7 @@ final class BaseKVStoreClient implements IBaseKVStoreClient {
                 } else {
                     return rpcClient.createRequestPipeline("", serverIdOpt.get(), null, emptyMap(), queryMethod);
                 }
-            }), latest -> patchRouter(storeId, latest), CLIENT_EXECUTOR, log);
+            }), latest -> patchRouter(storeId, latest), log);
     }
 
     @Override
@@ -513,13 +529,16 @@ final class BaseKVStoreClient implements IBaseKVStoreClient {
     }
 
     private void patchRouter(String storeId, KVRangeDescriptor latest) {
-        latestRouteMap.set(patchRouteMap(storeId, latest, new HashMap<>(latestRouteMap.get())));
-        NavigableMap<Boundary, RangeLeader> rangeLeaders = getRangeLeaders(latestRouteMap.get());
-        NavigableMap<Boundary, KVRangeSetting> router = buildClientRoute(clusterId, rangeLeaders, latestRouteMap.get());
-        NavigableMap<Boundary, KVRangeSetting> last = effectiveRouter.get();
-        if (!router.equals(last)) {
-            effectiveRouter.set(Collections.unmodifiableNavigableMap(router));
-        }
+        CLIENT_EXECUTOR.execute(() -> {
+            latestRouteMap.set(patchRouteMap(storeId, latest, new HashMap<>(latestRouteMap.get())));
+            NavigableMap<Boundary, RangeLeader> rangeLeaders = getRangeLeaders(latestRouteMap.get());
+            NavigableMap<Boundary, KVRangeSetting> router = buildClientRoute(clusterId, rangeLeaders,
+                latestRouteMap.get());
+            NavigableMap<Boundary, KVRangeSetting> last = effectiveRouter.get();
+            if (!router.equals(last)) {
+                effectiveRouter.set(Collections.unmodifiableNavigableMap(router));
+            }
+        });
     }
 
     private void refreshMutPipelines(Map<String, KVRangeStoreDescriptor> storeDescriptors) {

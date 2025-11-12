@@ -28,18 +28,13 @@ import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.parseInboxBucke
 
 import com.google.protobuf.ByteString;
 import java.time.Duration;
-import java.util.Collections;
-import java.util.List;
 import java.util.Optional;
 import java.util.function.Supplier;
 import org.apache.bifromq.basekv.proto.Boundary;
 import org.apache.bifromq.basekv.proto.KVRangeId;
-import org.apache.bifromq.basekv.store.api.IKVCloseableReader;
 import org.apache.bifromq.basekv.store.api.IKVRangeCoProc;
 import org.apache.bifromq.basekv.store.api.IKVRangeCoProcFactory;
-import org.apache.bifromq.basekv.store.api.IKVRangeSplitHinter;
-import org.apache.bifromq.basekv.store.range.hinter.MutationKVLoadBasedSplitHinter;
-import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
+import org.apache.bifromq.basekv.store.api.IKVRangeRefreshableReader;
 import org.apache.bifromq.dist.client.IDistClient;
 import org.apache.bifromq.inbox.client.IInboxClient;
 import org.apache.bifromq.plugin.eventcollector.IEventCollector;
@@ -58,7 +53,6 @@ public class InboxStoreCoProcFactory implements IKVRangeCoProcFactory {
     private final IResourceThrottler resourceThrottler;
     private final Duration detachTimeout;
     private final Duration metaCacheExpireTime;
-    private final Duration loadEstWindow;
     private final int expireRateLimit;
 
 
@@ -71,7 +65,6 @@ public class InboxStoreCoProcFactory implements IKVRangeCoProcFactory {
                                    IResourceThrottler resourceThrottler,
                                    Duration detachTimeout,
                                    Duration metaCacheExpireTime,
-                                   Duration loadEstimateWindow,
                                    int expireRateLimit) {
         this.distClient = distClient;
         this.inboxClient = inboxClient;
@@ -82,34 +75,27 @@ public class InboxStoreCoProcFactory implements IKVRangeCoProcFactory {
         this.resourceThrottler = resourceThrottler;
         this.detachTimeout = detachTimeout;
         this.metaCacheExpireTime = metaCacheExpireTime;
-        this.loadEstWindow = loadEstimateWindow;
         this.expireRateLimit = expireRateLimit;
     }
 
     @Override
-    public List<IKVRangeSplitHinter> createHinters(String clusterId, String storeId, KVRangeId id,
-                                                   Supplier<IKVCloseableReader> rangeReaderProvider) {
-        // load-based hinter only split range around up to the inbox bucket boundary
-        return Collections.singletonList(new MutationKVLoadBasedSplitHinter(loadEstWindow, key -> {
-            ByteString splitKey = upperBound(parseInboxBucketPrefix(key));
-            if (splitKey != null) {
-                Boundary boundary = rangeReaderProvider.get().boundary();
-                if (compareStartKey(startKey(boundary), splitKey) < 0
-                    && compareEndKeys(splitKey, endKey(boundary)) < 0) {
-                    return Optional.of(splitKey);
-                }
+    public Optional<ByteString> toSplitKey(ByteString key, Boundary boundary) {
+        // align split key to inbox bucket upper bound within the current boundary
+        ByteString splitKey = upperBound(parseInboxBucketPrefix(key));
+        if (splitKey != null) {
+            if (compareStartKey(startKey(boundary), splitKey) < 0
+                && compareEndKeys(splitKey, endKey(boundary)) < 0) {
+                return Optional.of(splitKey);
             }
-            return Optional.empty();
-        },
-            "clusterId", clusterId, "storeId", storeId, "rangeId",
-            KVRangeIdUtil.toString(id)));
+        }
+        return Optional.empty();
     }
 
     @Override
     public IKVRangeCoProc createCoProc(String clusterId,
                                        String storeId,
                                        KVRangeId id,
-                                       Supplier<IKVCloseableReader> rangeReaderProvider) {
+                                       Supplier<IKVRangeRefreshableReader> rangeReaderProvider) {
         return new InboxStoreCoProc(clusterId,
             storeId,
             id,

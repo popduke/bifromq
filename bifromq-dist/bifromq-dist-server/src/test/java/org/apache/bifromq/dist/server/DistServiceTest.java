@@ -24,7 +24,9 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
+import com.google.protobuf.Struct;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import lombok.extern.slf4j.Slf4j;
@@ -33,7 +35,6 @@ import org.apache.bifromq.basecluster.IAgentHost;
 import org.apache.bifromq.basecrdt.service.CRDTServiceOptions;
 import org.apache.bifromq.basecrdt.service.ICRDTService;
 import org.apache.bifromq.basekv.client.IBaseKVStoreClient;
-import org.apache.bifromq.basekv.localengine.memory.InMemKVEngineConfigurator;
 import org.apache.bifromq.basekv.metaservice.IBaseKVMetaService;
 import org.apache.bifromq.basekv.store.option.KVRangeStoreOptions;
 import org.apache.bifromq.basekv.utils.BoundaryUtil;
@@ -48,10 +49,13 @@ import org.apache.bifromq.plugin.eventcollector.IEventCollector;
 import org.apache.bifromq.plugin.resourcethrottler.IResourceThrottler;
 import org.apache.bifromq.plugin.settingprovider.ISettingProvider;
 import org.apache.bifromq.plugin.settingprovider.Setting;
+import org.apache.bifromq.plugin.subbroker.CheckReply;
+import org.apache.bifromq.plugin.subbroker.CheckRequest;
 import org.apache.bifromq.plugin.subbroker.IDeliverer;
 import org.apache.bifromq.plugin.subbroker.ISubBroker;
 import org.apache.bifromq.plugin.subbroker.ISubBrokerManager;
 import org.mockito.Mock;
+import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
@@ -90,6 +94,15 @@ public abstract class DistServiceTest {
         closeable = MockitoAnnotations.openMocks(this);
         when(subBrokerMgr.get(anyInt())).thenReturn(inboxBroker);
         when(inboxBroker.open(anyString())).thenReturn(inboxDeliverer);
+        Mockito.lenient().when(inboxBroker.check(Mockito.any())).thenAnswer(invocation -> {
+            // build a CheckReply with OK codes aligned with request size
+            CheckRequest req = invocation.getArgument(0);
+            CheckReply.Builder reply = CheckReply.newBuilder();
+            for (int i = 0; i < req.getMatchInfoCount(); i++) {
+                reply.addCode(CheckReply.Code.OK);
+            }
+            return CompletableFuture.completedFuture(reply.build());
+        });
         bgTaskExecutor = Executors.newSingleThreadScheduledExecutor();
         AgentHostOptions agentHostOpts = AgentHostOptions.builder()
             .addr("127.0.0.1")
@@ -108,8 +121,11 @@ public abstract class DistServiceTest {
         distClient = IDistClient.newBuilder().trafficService(trafficService).build();
 
         KVRangeStoreOptions kvRangeStoreOptions = new KVRangeStoreOptions();
-        kvRangeStoreOptions.setDataEngineConfigurator(new InMemKVEngineConfigurator());
-        kvRangeStoreOptions.setWalEngineConfigurator(new InMemKVEngineConfigurator());
+        Struct memConf = Struct.newBuilder().build();
+        kvRangeStoreOptions.setDataEngineType("memory");
+        kvRangeStoreOptions.setDataEngineConf(memConf);
+        kvRangeStoreOptions.setWalEngineType("memory");
+        kvRangeStoreOptions.setWalEngineConf(memConf);
 
         workerClient = IBaseKVStoreClient
             .newBuilder()
