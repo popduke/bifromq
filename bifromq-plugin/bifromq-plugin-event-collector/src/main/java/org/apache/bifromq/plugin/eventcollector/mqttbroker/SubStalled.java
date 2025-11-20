@@ -14,27 +14,33 @@
  * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
  * KIND, either express or implied.  See the License for the
  * specific language governing permissions and limitations
- * under the License.
+ * under the License.    
  */
 
-package org.apache.bifromq.basekv.raft.exception;
+package org.apache.bifromq.plugin.eventcollector.mqttbroker;
 
-public class CompactionException extends RuntimeException {
-    public CompactionException(String message, Throwable cause) {
-        super(message, cause);
-    }
+import static org.apache.bifromq.plugin.eventcollector.EventType.SUB_STALLED;
 
-    private CompactionException(String message) {
-        super(message);
-    }
+import lombok.Getter;
+import lombok.Setter;
+import lombok.ToString;
+import lombok.experimental.Accessors;
+import org.apache.bifromq.plugin.eventcollector.ClientEvent;
+import org.apache.bifromq.plugin.eventcollector.EventType;
 
-    public static StaleSnapshotException staleSnapshot() {
-        return new StaleSnapshotException();
-    }
+@Getter
+@Setter
+@Accessors(fluent = true, chain = true)
+@ToString(callSuper = true)
+public final class SubStalled extends ClientEvent<SubStalled> {
+    private long bytesBeforeWritable;
+    private int unconfirmedCount;
+    private int writeBufferLowWaterMark;
+    private int writeBufferHighWaterMark;
 
-    public static class StaleSnapshotException extends CompactionException {
-        private StaleSnapshotException() {
-            super("Stale Snapshot");
-        }
+    @Override
+    public EventType type() {
+        return SUB_STALLED;
     }
 }
+

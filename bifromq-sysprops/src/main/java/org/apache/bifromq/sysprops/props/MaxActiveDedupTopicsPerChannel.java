@@ -17,24 +17,19 @@
  * under the License.
  */
 
-package org.apache.bifromq.basekv.raft.exception;
+package org.apache.bifromq.sysprops.props;
 
-public class CompactionException extends RuntimeException {
-    public CompactionException(String message, Throwable cause) {
-        super(message, cause);
-    }
+import org.apache.bifromq.sysprops.BifroMQSysProp;
+import org.apache.bifromq.sysprops.parser.IntegerParser;
 
-    private CompactionException(String message) {
-        super(message);
-    }
+/**
+ * Max active dedup topics per channel, bounded to positive integer.
+ */
+public final class MaxActiveDedupTopicsPerChannel extends BifroMQSysProp<Integer, IntegerParser> {
+    public static final MaxActiveDedupTopicsPerChannel INSTANCE = new MaxActiveDedupTopicsPerChannel();
 
-    public static StaleSnapshotException staleSnapshot() {
-        return new StaleSnapshotException();
-    }
-
-    public static class StaleSnapshotException extends CompactionException {
-        private StaleSnapshotException() {
-            super("Stale Snapshot");
-        }
+    private MaxActiveDedupTopicsPerChannel() {
+        super("maxActiveDedupTopicsPerChannel", 10, IntegerParser.POSITIVE);
     }
 }
+

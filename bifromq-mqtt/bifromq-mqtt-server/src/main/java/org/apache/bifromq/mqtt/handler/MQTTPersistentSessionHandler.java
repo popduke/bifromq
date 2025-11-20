@@ -39,8 +39,6 @@ import static org.apache.bifromq.plugin.resourcethrottler.TenantResourceType.Tot
 import static org.apache.bifromq.plugin.resourcethrottler.TenantResourceType.TotalPersistentUnsubscribePerSecond;
 import static org.apache.bifromq.type.QoS.AT_LEAST_ONCE;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import io.micrometer.core.instrument.Timer;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.mqtt.MqttMessage;
@@ -53,7 +51,6 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bifromq.base.util.AsyncRetry;
 import org.apache.bifromq.basehlc.HLC;
@@ -76,6 +73,8 @@ import org.apache.bifromq.plugin.eventcollector.mqttbroker.clientdisconnect.ByCl
 import org.apache.bifromq.retain.rpc.proto.MatchReply;
 import org.apache.bifromq.retain.rpc.proto.MatchRequest;
 import org.apache.bifromq.sysprops.props.DataPlaneMaxBurstLatencyMillis;
+import org.apache.bifromq.sysprops.props.MaxActiveDedupChannels;
+import org.apache.bifromq.sysprops.props.MaxActiveDedupTopicsPerChannel;
 import org.apache.bifromq.type.ClientInfo;
 import org.apache.bifromq.type.MatchInfo;
 import org.apache.bifromq.type.Message;
@@ -92,12 +91,16 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
     private final InboxVersion inboxVersion;
     private final NavigableMap<Long, StagingMessage> stagingBuffer = new TreeMap<>();
     private final IInboxClient inboxClient;
-    private final Cache<String, AtomicReference<Long>> qoS0TimestampsByMQTTPublisher = Caffeine.newBuilder()
-        .expireAfterAccess(2 * DataPlaneMaxBurstLatencyMillis.INSTANCE.get(), TimeUnit.MILLISECONDS)
-        .build();
-    private final Cache<String, AtomicReference<Long>> qoS12TimestampsByMQTTPublisher = Caffeine.newBuilder()
-        .expireAfterAccess(2 * DataPlaneMaxBurstLatencyMillis.INSTANCE.get(), TimeUnit.MILLISECONDS)
-        .build();
+    private final DedupCache qoS0DedupCache = new DedupCache(
+        2 * DataPlaneMaxBurstLatencyMillis.INSTANCE.get(),
+        MaxActiveDedupChannels.INSTANCE.get(),
+        MaxActiveDedupTopicsPerChannel.INSTANCE.get()
+    );
+    private final DedupCache qoS12DedupCache = new DedupCache(
+        2 * DataPlaneMaxBurstLatencyMillis.INSTANCE.get(),
+        MaxActiveDedupChannels.INSTANCE.get(),
+        MaxActiveDedupTopicsPerChannel.INSTANCE.get()
+    );
     private boolean qos0Confirming = false;
     private boolean inboxConfirming = false;
     private long nextSendSeq = 0;
@@ -107,7 +110,6 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
     private State state = State.INIT;
     private ScheduledFuture<?> confirmTimeout;
     private ScheduledFuture<?> hintTimeout;
-    private int currentHint = 1;
 
     protected MQTTPersistentSessionHandler(TenantSettings settings,
                                            ITenantMeter tenantMeter,
@@ -151,9 +153,7 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
 
     @Override
     public void doTearDown(ChannelHandlerContext ctx) {
-        if (hintTimeout != null && !hintTimeout.isCancelled()) {
-            hintTimeout.cancel(false);
-        }
+        cancelScheduledHint();
         if (inboxReader != null) {
             inboxReader.close();
         }
@@ -385,19 +385,25 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
         inboxReader = inboxClient.openInboxReader(clientInfo().getTenantId(), userSessionId,
             inboxVersion.getIncarnation());
         inboxReader.fetch(this::consume);
-        currentHint = clientReceiveQuota();
-        scheduleHintTimeout();
-        inboxReader.hint(currentHint);
+        inboxReader.hint(clientReceiveQuota());
         // resume channel read after inbox being setup
         onInitialized();
         resumeChannelRead();
     }
 
     private void scheduleHintTimeout() {
+        cancelScheduledHint();
         hintTimeout = ctx.executor().schedule(() -> {
-            inboxReader.hint(currentHint);
-            scheduleHintTimeout();
+            inboxReader.hint(clientReceiveQuota());
+            hintTimeout = null;
         }, ThreadLocalRandom.current().nextLong(15, 45), TimeUnit.SECONDS);
+    }
+
+    private void cancelScheduledHint() {
+        if (hintTimeout != null && !hintTimeout.isDone()) {
+            hintTimeout.cancel(true);
+            hintTimeout = null;
+        }
     }
 
     private void scheduleConfirmTimeout(long upToSeq) {
@@ -462,8 +468,7 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
             }
         }
         confirmedMsgs.clear();
-        currentHint = clientReceiveQuota();
-        inboxReader.hint(currentHint);
+        inboxReader.hint(clientReceiveQuota());
         ctx.executor().execute(this::drainStaging);
     }
 
@@ -491,8 +496,7 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
                         if (upToSeq < inboxConfirmedUpToSeq) {
                             confirmSendBuffer();
                         } else {
-                            currentHint = clientReceiveQuota();
-                            inboxReader.hint(currentHint);
+                            inboxReader.hint(clientReceiveQuota());
                         }
                     }
                     case NO_INBOX, CONFLICT ->
@@ -509,9 +513,7 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
                         if (upToSeq < inboxConfirmedUpToSeq) {
                             confirmSendBuffer();
                         } else {
-                            currentHint = clientReceiveQuota();
-                            inboxReader.hint(currentHint);
-                            scheduleHintTimeout();
+                            inboxReader.hint(clientReceiveQuota());
                         }
                     }
                     default -> {
@@ -523,11 +525,9 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
 
     private void consume(Fetched fetched) {
         ctx.executor().execute(() -> {
-            if (hintTimeout != null && !hintTimeout.isCancelled()) {
-                hintTimeout.cancel(false);
-            }
             switch (fetched.getResult()) {
                 case OK -> {
+                    cancelScheduledHint();
                     // deal with qos0
                     if (fetched.getQos0MsgCount() > 0) {
                         fetched.getQos0MsgList().forEach(this::pubQoS0Message);
@@ -544,15 +544,8 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
                         }
                     }
                 }
-                case BACK_PRESSURE_REJECTED -> {
-                    currentHint = clientReceiveQuota();
-                    scheduleHintTimeout();
-                }
-                case TRY_LATER -> {
-                    currentHint = clientReceiveQuota();
-                    scheduleHintTimeout();
-                    inboxReader.hint(currentHint);
-                }
+                case BACK_PRESSURE_REJECTED -> scheduleHintTimeout();
+                case TRY_LATER -> inboxReader.hint(clientReceiveQuota());
                 case NO_INBOX, ERROR ->
                     handleProtocolResponse(helper().onInboxTransientError(fetched.getResult().name()));
                 default -> {
@@ -563,8 +556,8 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
     }
 
     private void pubQoS0Message(InboxMessage inboxMsg) {
-        boolean isDup = isDuplicateMessage(inboxMsg.getMsg().getPublisher(), inboxMsg.getMsg().getMessage(),
-            qoS0TimestampsByMQTTPublisher);
+        boolean isDup = isDuplicateMessage(inboxMsg.getMsg().getTopic(),
+            inboxMsg.getMsg().getPublisher(), inboxMsg.getMsg().getMessage(), qoS0DedupCache);
         inboxMsg.getMatchedTopicFilterMap()
             .forEach((topicFilter, option) -> pubQoS0Message(topicFilter, option, inboxMsg.getMsg(), isDup));
     }
@@ -584,8 +577,8 @@ public abstract class MQTTPersistentSessionHandler extends MQTTSessionHandler im
     }
 
     private void pubBufferedMessage(InboxMessage inboxMsg, boolean batchEnd) {
-        boolean isDup = isDuplicateMessage(inboxMsg.getMsg().getPublisher(), inboxMsg.getMsg().getMessage(),
-            qoS12TimestampsByMQTTPublisher);
+        boolean isDup = isDuplicateMessage(inboxMsg.getMsg().getTopic(),
+            inboxMsg.getMsg().getPublisher(), inboxMsg.getMsg().getMessage(), qoS12DedupCache);
         int i = 0;
         for (Map.Entry<String, TopicFilterOption> entry : inboxMsg.getMatchedTopicFilterMap().entrySet()) {
             String topicFilter = entry.getKey();

@@ -37,6 +37,7 @@ import static org.apache.bifromq.metrics.TenantMetric.MqttQoS2ExternalLatency;
 import static org.apache.bifromq.metrics.TenantMetric.MqttQoS2IngressBytes;
 import static org.apache.bifromq.metrics.TenantMetric.MqttResendBytes;
 import static org.apache.bifromq.metrics.TenantMetric.MqttSendingQuota;
+import static org.apache.bifromq.metrics.TenantMetric.MqttStalledCount;
 import static org.apache.bifromq.mqtt.handler.IMQTTProtocolHelper.SubResult.EXCEED_LIMIT;
 import static org.apache.bifromq.mqtt.handler.MQTTSessionIdUtil.userSessionId;
 import static org.apache.bifromq.mqtt.handler.v5.MQTT5MessageUtils.messageExpiryInterval;
@@ -63,7 +64,6 @@ import static org.apache.bifromq.util.TopicUtil.isSharedSubscription;
 import static org.apache.bifromq.util.TopicUtil.isValidTopicFilter;
 import static org.apache.bifromq.util.TopicUtil.isWildcardTopicFilter;
 
-import com.github.benmanes.caffeine.cache.Cache;
 import com.google.common.collect.Sets;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
@@ -88,7 +88,6 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.bifromq.base.util.FutureTracker;
@@ -112,6 +111,7 @@ import org.apache.bifromq.plugin.eventcollector.Event;
 import org.apache.bifromq.plugin.eventcollector.IEventCollector;
 import org.apache.bifromq.plugin.eventcollector.OutOfTenantResource;
 import org.apache.bifromq.plugin.eventcollector.mqttbroker.PingReq;
+import org.apache.bifromq.plugin.eventcollector.mqttbroker.SubStalled;
 import org.apache.bifromq.plugin.eventcollector.mqttbroker.accessctrl.PubActionDisallow;
 import org.apache.bifromq.plugin.eventcollector.mqttbroker.accessctrl.SubActionDisallow;
 import org.apache.bifromq.plugin.eventcollector.mqttbroker.accessctrl.UnsubActionDisallow;
@@ -199,6 +199,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     private long lastActiveAtNanos;
     private ScheduledFuture<?> resendTask;
     private int receivingCount = 0;
+    private ScheduledFuture<?> stallCheckTask;
 
     protected MQTTSessionHandler(TenantSettings settings,
                                  ITenantMeter tenantMeter,
@@ -404,6 +405,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         if (noDelayLWT != null) {
             addBgTask(pubWillMessage(noDelayLWT));
         }
+        cancelStallTask();
         Sets.newHashSet(fgTasks).forEach(t -> t.cancel(true));
         doTearDown(ctx);
         sessionCtx.localSessionRegistry.remove(channelId(), this);
@@ -426,6 +428,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
     public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
         super.exceptionCaught(ctx, cause);
         log.debug("ctx: {}, cause:", ctx, cause);
+        cancelStallTask();
         // if disconnection is caused purely by channel error
         handleProtocolResponse(
             ProtocolResponse.goAwayNow(getLocal(ClientChannelError.class).clientInfo(clientInfo).cause(cause)));
@@ -433,7 +436,9 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
 
     @Override
     public void channelWritabilityChanged(ChannelHandlerContext ctx) {
+        super.channelWritabilityChanged(ctx);
         if (ctx.channel().isWritable()) {
+            cancelStallTask();
             if (!unconfirmedPacketIds.isEmpty()) {
                 // resend immediately when channel becomes writable
                 resend();
@@ -441,6 +446,11 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         } else {
             if (resendTask != null) {
                 resendTask.cancel(false);
+            }
+            if (!unconfirmedPacketIds.isEmpty() && stallCheckTask == null) {
+                final io.netty.channel.Channel ch = ctx.channel();
+                stallCheckTask = ctx.executor().schedule(() -> fireStallIfStillUnwritable(ch),
+                    stallTimeoutSeconds(), TimeUnit.SECONDS);
             }
         }
     }
@@ -824,6 +834,30 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         }
     }
 
+    private int stallTimeoutSeconds() {
+        return settings.maxResendTimes * settings.resendTimeoutSeconds;
+    }
+
+    private void cancelStallTask() {
+        if (stallCheckTask != null) {
+            stallCheckTask.cancel(false);
+            stallCheckTask = null;
+        }
+    }
+
+    private void fireStallIfStillUnwritable(io.netty.channel.Channel ch) {
+        if (!ch.isWritable() && !unconfirmedPacketIds.isEmpty()) {
+            eventCollector.report(getLocal(SubStalled.class)
+                .clientInfo(clientInfo)
+                .bytesBeforeWritable(ch.bytesBeforeWritable())
+                .unconfirmedCount(unconfirmedPacketIds.size())
+                .writeBufferLowWaterMark(ch.config().getWriteBufferLowWaterMark())
+                .writeBufferHighWaterMark(ch.config().getWriteBufferHighWaterMark()));
+            tenantMeter.recordCount(MqttStalledCount);
+        }
+        stallCheckTask = null;
+    }
+
     protected int clientReceiveMaximum() {
         return helper().clientReceiveMaximum();
     }
@@ -852,6 +886,9 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             confirm(confirmingMsg, delivered);
         } else {
             log.trace("No msg to confirm: sessionId={}, packetId={}", userSessionId, packetId);
+        }
+        if (unconfirmedPacketIds.isEmpty()) {
+            cancelStallTask();
         }
         return msg;
     }
@@ -977,7 +1014,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             }
             return;
         }
-        if (messageExpiryInterval(pubMsg.variableHeader().properties()).orElse(Integer.MAX_VALUE) < 0) {
+        if (messageExpiryInterval(pubMsg.variableHeader().properties()).orElse(Integer.MAX_VALUE) <= 0) {
             // If the Message Expiry Interval has passed and the Server has not managed to start onward delivery
             // to a matching subscriber, then it MUST delete the copy of the message for that subscriber [MQTT-3.3.2-5]
             if (settings.debugMode) {
@@ -1118,7 +1155,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             ctx.executor().execute(() -> confirm(packetId, false));
             return;
         }
-        if (messageExpiryInterval(pubMsg.variableHeader().properties()).orElse(Integer.MAX_VALUE) < 0) {
+        if (messageExpiryInterval(pubMsg.variableHeader().properties()).orElse(Integer.MAX_VALUE) <= 0) {
             //  If the Message Expiry Interval has passed and the Server has not managed to start onward delivery
             //  to a matching subscriber, then it MUST delete the copy of the message for that subscriber [MQTT-3.3.2-5]
             if (settings.debugMode) {
@@ -1181,7 +1218,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             } else {
                 receiveQuota.onErrorSignal(sessionCtx.nanoTime());
                 if (settings.debugMode) {
-                    String detail = f.cause() == null ? "unknown" : f.cause().getMessage();
+                    String detail = getPushErrorDetail(f.cause());
                     switch (msg.qos()) {
                         case AT_LEAST_ONCE -> eventCollector.report(getLocal(QoS1PushError.class)
                             .detail(detail)
@@ -1208,6 +1245,16 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
                 }
             }
         });
+    }
+
+    private String getPushErrorDetail(Throwable cause) {
+        if (cause == null) {
+            return "unknown";
+        }
+        if (cause.getMessage() != null) {
+            return cause.getMessage();
+        }
+        return cause.getClass().getSimpleName();
     }
 
     private void reportDropConfirmableMsgEvent(RoutedMessage msg, DropReason reason) {
@@ -1574,8 +1621,10 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
         }
     }
 
-    protected final boolean isDuplicateMessage(ClientInfo publisher, Message message,
-                                               Cache<String, AtomicReference<Long>> latestMsgTsByPublisher) {
+    protected final boolean isDuplicateMessage(String topic,
+                                               ClientInfo publisher,
+                                               Message message,
+                                               DedupCache dedupCache) {
         if (message.getIsRetained()) {
             return false;
         }
@@ -1584,12 +1633,7 @@ public abstract class MQTTSessionHandler extends MQTTMessageHandler implements I
             // don't deduplicate message published from HTTP API
             return false;
         }
-        AtomicReference<Long> lastPubRef = latestMsgTsByPublisher.get(mqttPublisherKey, k -> new AtomicReference<>(0L));
-        if (lastPubRef.get() >= message.getTimestamp()) {
-            return true;
-        }
-        lastPubRef.set(message.getTimestamp());
-        return false;
+        return dedupCache.isDuplicate(mqttPublisherKey, topic, message.getTimestamp());
     }
 
     private CompletableFuture<Void> doPubLastWill(LWT willMessage) {

@@ -27,6 +27,7 @@ import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.inboxStartKeyPr
 import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.isInboxInstanceKey;
 import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.isInboxInstanceStartKey;
 import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.parseInboxInstanceStartKeyPrefix;
+import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.parseInboxStartKeyPrefix;
 import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.parseSeq;
 import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.parseTenantId;
 import static org.apache.bifromq.inbox.store.schema.KVSchemaUtil.qos0QueuePrefix;
@@ -56,6 +57,8 @@ import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
@@ -792,21 +795,13 @@ final class InboxStoreCoProc implements IKVRangeCoProc {
                 TenantInboxInstance inboxInstance = new TenantInboxInstance(
                     TENANT_ID_INTERNER.intern(tenantId),
                     new InboxInstance(metadata.getInboxId(), metadata.getIncarnation()));
-                // schedule a task for sending LWT or expiry session
+                // schedule tasks for historical incarnations immediately
                 if (metadata.hasLwt()) {
-                    Duration delay = ofSeconds(
-                        Integer.compareUnsigned(metadata.getLwt().getDelaySeconds(), metadata.getExpirySeconds())
-                            < 0 ? metadata.getLwt().getDelaySeconds() : metadata.getExpirySeconds())
-                        .plusMillis(ThreadLocalRandom.current().nextLong(0, 1000));
                     delayTaskRunner.scheduleIfAbsent(inboxInstance,
-                        new SendLWTTask(delay, metadata.getMod(), inboxClient));
+                        new SendLWTTask(Duration.ZERO, metadata.getMod(), inboxClient));
                 } else {
-                    if (Integer.compareUnsigned(metadata.getExpirySeconds(), UINT_MAX) < 0) {
-                        // UINT_MAX never expire according to MQTT5 spec
-                        Duration delay = ofSeconds(metadata.getExpirySeconds());
-                        delayTaskRunner.scheduleIfAbsent(inboxInstance,
-                            new ExpireInboxTask(delay, metadata.getMod(), inboxClient));
-                    }
+                    delayTaskRunner.scheduleIfAbsent(inboxInstance,
+                        new ExpireInboxTask(Duration.ZERO, metadata.getMod(), inboxClient));
                 }
             }));
         };
@@ -889,21 +884,13 @@ final class InboxStoreCoProc implements IKVRangeCoProc {
                 TenantInboxInstance inboxInstance = new TenantInboxInstance(
                     TENANT_ID_INTERNER.intern(tenantId),
                     new InboxInstance(metadata.getInboxId(), metadata.getIncarnation()));
-                // schedule a task for sending LWT or expiry session
+                // schedule tasks for historical incarnations immediately
                 if (metadata.hasLwt()) {
-                    Duration delay = ofSeconds(
-                        Integer.compareUnsigned(metadata.getLwt().getDelaySeconds(), metadata.getExpirySeconds())
-                            < 0 ? metadata.getLwt().getDelaySeconds() : metadata.getExpirySeconds())
-                        .plusMillis(ThreadLocalRandom.current().nextLong(0, 1000));
                     delayTaskRunner.scheduleIfAbsent(inboxInstance,
-                        new SendLWTTask(delay, metadata.getMod(), inboxClient));
+                        new SendLWTTask(Duration.ZERO, metadata.getMod(), inboxClient));
                 } else {
-                    if (Integer.compareUnsigned(metadata.getExpirySeconds(), UINT_MAX) < 0) {
-                        // UINT_MAX never expire according to MQTT5 spec
-                        Duration delay = ofSeconds(metadata.getExpirySeconds());
-                        delayTaskRunner.scheduleIfAbsent(inboxInstance,
-                            new ExpireInboxTask(delay, metadata.getMod(), inboxClient));
-                    }
+                    delayTaskRunner.scheduleIfAbsent(inboxInstance,
+                        new ExpireInboxTask(Duration.ZERO, metadata.getMod(), inboxClient));
                 }
             }));
         };
@@ -1161,16 +1148,126 @@ final class InboxStoreCoProc implements IKVRangeCoProc {
 
     @SneakyThrows
     private CompletableFuture<GCReply> gc(GCRequest request, IKVRangeReader reader) {
+        int scanQuota = request.getScanQuota();
+        AtomicInteger inspectedAcc = new AtomicInteger();
+        AtomicBoolean wrapped = new AtomicBoolean(false);
+        AtomicReference<ByteString> nextStartKeyRef = new AtomicReference<>(null);
+        List<CompletableFuture<Integer>> inboxFutures = new LinkedList<>();
+        int probe = 0;
         try (IKVIterator itr = reader.iterator()) {
-            List<CompletableFuture<Void>> expireFutures = new LinkedList<>();
-            for (itr.seekToFirst(); itr.isValid(); ) {
-                String tenantId = parseTenantId(itr.key());
-                expireFutures.add(expireTenant(tenantId, Duration.ZERO, request.getNow(), reader));
-                itr.seek(upperBound(tenantBeginKeyPrefix(tenantId)));
+            if (request.hasStartKey()) {
+                ByteString start = request.getStartKey();
+                if (isInboxInstanceKey(start)) {
+                    itr.seek(parseInboxInstanceStartKeyPrefix(start));
+                } else {
+                    itr.seek(start);
+                }
+                if (!itr.isValid()) {
+                    wrapped.set(true);
+                    itr.seekToFirst();
+                }
+            } else {
+                itr.seekToFirst();
             }
-            return CompletableFuture.allOf(expireFutures.toArray(CompletableFuture[]::new))
-                .thenApply(v -> GCReply.newBuilder().build());
+
+            while (itr.isValid() && inspectedAcc.get() < scanQuota) {
+                ByteString key = itr.key();
+                if (!isInboxInstanceStartKey(key)) {
+                    if (isInboxInstanceKey(key)) {
+                        ByteString inboxPrefix = parseInboxInstanceStartKeyPrefix(key);
+                        itr.seek(upperBound(parseInboxStartKeyPrefix(inboxPrefix)));
+                        probe = 0;
+                    } else {
+                        if (probe < 20) {
+                            itr.next();
+                            probe++;
+                        } else {
+                            String tenantId = parseTenantId(key);
+                            itr.seek(upperBound(tenantBeginKeyPrefix(tenantId)));
+                            probe = 0;
+                        }
+                    }
+                    continue;
+                }
+
+                InboxMetadata metadata;
+                try {
+                    metadata = InboxMetadata.parseFrom(itr.value());
+                } catch (InvalidProtocolBufferException e) {
+                    ByteString inboxPrefix = parseInboxInstanceStartKeyPrefix(key);
+                    itr.seek(upperBound(parseInboxStartKeyPrefix(inboxPrefix)));
+                    probe = 0;
+                    continue;
+                }
+
+                String tenantId = parseTenantId(key);
+                String inboxId = metadata.getInboxId();
+                SortedMap<Long, InboxMetadata> inboxVersions = getAllInboxVersions(tenantId, inboxId, reader);
+                if (inboxVersions.isEmpty()) {
+                    // inconsistent state, skip this inbox group
+                    ByteString inboxPrefix = parseInboxInstanceStartKeyPrefix(key);
+                    itr.seek(upperBound(parseInboxStartKeyPrefix(inboxPrefix)));
+                    probe = 0;
+                    continue;
+                }
+
+                inspectedAcc.addAndGet(inboxVersions.size());
+
+                List<CompletableFuture<ExpireCheckResult>> checks = new LinkedList<>();
+                checkInboxOnline(tenantId, Duration.ZERO, request.getNow(), inboxVersions, checks);
+                CompletableFuture<Integer> inboxDone = CompletableFuture
+                    .allOf(checks.toArray(CompletableFuture[]::new))
+                    .thenApply(v -> {
+                        int expiredCount = 0;
+                        for (CompletableFuture<ExpireCheckResult> f : checks) {
+                            ExpireCheckResult r = f.join();
+                            if (r.expired) {
+                                TenantInboxInstance inboxInstance = new TenantInboxInstance(
+                                    TENANT_ID_INTERNER.intern(tenantId),
+                                    new InboxInstance(r.metadata.getInboxId(), r.metadata.getIncarnation()));
+                                delayTaskRunner.schedule(inboxInstance,
+                                    new ExpireInboxTask(Duration.ofMillis(0), r.metadata.getMod(), inboxClient));
+                                expiredCount++;
+                            }
+                        }
+                        return expiredCount;
+                    });
+                inboxFutures.add(inboxDone);
+
+                ByteString inboxPrefix = parseInboxInstanceStartKeyPrefix(key);
+                itr.seek(upperBound(parseInboxStartKeyPrefix(inboxPrefix)));
+                probe = 0;
+            }
+
+            if (itr.isValid()) {
+                ByteString k = itr.key();
+                if (isInboxInstanceKey(k)) {
+                    ByteString inboxPrefix = parseInboxInstanceStartKeyPrefix(k);
+                    nextStartKeyRef.set(parseInboxStartKeyPrefix(inboxPrefix));
+                } else {
+                    nextStartKeyRef.set(k);
+                }
+            } else {
+                wrapped.set(true);
+            }
         }
+
+        final AtomicInteger removedAcc = new AtomicInteger();
+        CompletableFuture<?>[] waits = inboxFutures.stream()
+            .map(f -> f.thenAccept(removedAcc::addAndGet))
+            .toArray(CompletableFuture[]::new);
+        return CompletableFuture.allOf(waits).thenApply(v -> {
+            int removed = removedAcc.get();
+            GCReply.Builder reply = GCReply.newBuilder()
+                .setInspectedCount(inspectedAcc.get())
+                .setRemoveSuccess(removed)
+                .setWrapped(wrapped.get());
+            ByteString ns = nextStartKeyRef.get();
+            if (ns != null) {
+                reply.setNextStartKey(ns);
+            }
+            return reply.build();
+        });
     }
 
     private Runnable batchInsert(BatchInsertRequest request,
@@ -1819,6 +1916,7 @@ final class InboxStoreCoProc implements IKVRangeCoProc {
                         latestInboxMetadata.getClient().getMetadataMap().get(MQTT_USER_ID_KEY),
                         latestInboxMetadata.getClient().getMetadataMap().get(MQTT_CLIENT_ID_KEY));
                     futuresHolder.add(sessionDictClient.exist(clientId)
+                        .exceptionally(e -> OnlineCheckResult.ERROR)
                         .thenApply((v) -> {
                             if (v == OnlineCheckResult.NOT_EXISTS) {
                                 return new ExpireCheckResult(latestInboxMetadata, true);
