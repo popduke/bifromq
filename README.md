@@ -3,7 +3,7 @@
 [![GitHub Release](https://img.shields.io/github/release/bifromqio/bifromq?color=brightgreen&label=Release)](https://github.com/bifromqio/bifromq/releases)
 <a href="https://discord.gg/Pfs3QRadRB"><img src="https://img.shields.io/discord/1115542029531885599?logo=discord&logoColor=white" alt="BifroMQ Discord server" /></a>
 
-BifroMQ is a high-performance, distributed MQTT broker that natively supports multi-tenancy. It is designed to enable the building of large-scale IoT device connectivity and messaging systems.
+Apache BifroMQ is a high-performance, distributed MQTT broker that natively supports multi-tenancy. It is designed to enable the building of large-scale IoT device connectivity and messaging systems.
 
 ## Features
 
@@ -29,16 +29,16 @@ GitHub [repository](https://github.com/apache/bifromq-sites).
 ### Docker
 
 ```
-docker run -d -m <MEM_LIMIT> -e MEM_LIMIT='<MEM_LIMIT_IN_BYTES>' --name bifromq -p 1883:1883 bifromq/bifromq:latest
+docker run -d -m <MEM_LIMIT> -e MEM_LIMIT='<MEM_LIMIT_IN_BYTES>' --name bifromq -p 1883:1883 apache/bifromq:${TAG}
 ```
 
 Substitute `<MEM_LIMIT>` and `<MEM_LIMIT_IN_BYTES>` with the actual memory allocation for the Docker process, for
-example, `2G` for `<MEM_LIMIT>` and `2147483648` for `<MEM_LIMIT_IN_BYTES>`. If not specified, BifroMQ defaults to using
+example, `2G` for `<MEM_LIMIT>` and `2147483648` for `<MEM_LIMIT_IN_BYTES>`. If not specified, Apache BifroMQ defaults to using
 the hosting server's physical memory for determining JVM parameters. This can result in the Docker process being
 terminated by the host's Out-of-Memory (OOM) Killer. Refer to [here](https://bifromq.apache.org/docs/installation/docker/)
 for more information.
 
-You can build a BifroMQ cluster using Docker Compose on a single host for development and testing. Suppose you want to create a cluster with three nodes: node1, 
+You can build an Apache BifroMQ cluster using Docker Compose on a single host for development and testing. Suppose you want to create a cluster with three nodes: node1, 
 node2, and node3. The directory structure should be as follows:
 ```
 |- docker-compose.yml
@@ -58,7 +58,7 @@ The `docker-compose.yml` file defines the services for the three nodes:
 ```yml
 services:
   bifromq-node1:
-    image: bifromq/bifromq:latest
+    image: apache/bifromq:${TAG}
     container_name: bifromq-node1
     volumes:
       - ./node1/standalone.yml:/home/bifromq/conf/standalone.yml
@@ -70,7 +70,7 @@ services:
       - bifromq-net
 
   bifromq-node2:
-    image: bifromq/bifromq:latest
+    image: apache/bifromq:${TAG}
     container_name: bifromq-node2
     volumes:
       - ./node2/standalone.yml:/home/bifromq/conf/standalone.yml
@@ -82,7 +82,7 @@ services:
       - bifromq-net
 
   bifromq-node3:
-    image: bifromq/bifromq:latest
+    image: apache/bifromq:${TAG}
     container_name: bifromq-node3
     volumes:
       - ./node3/standalone.yml:/home/bifromq/conf/standalone.yml
@@ -107,8 +107,9 @@ docker compose up -d
 
 * JDK 17+
 * Maven 3.5.0+
+* (Optional for native TLS) OpenSSL available on the host; if absent, TLS falls back to JDK implementation.
 
-#### Get source & Build
+#### Get Source & Build
 
 Clone the repository to your local workspace:
 
@@ -122,13 +123,24 @@ Navigate to the project root folder and execute the following commands to build 
 ```
 cd bifromq
 mvn wrapper:wrapper
-./mvnw -U clean package
+./mvnw -U clean verify -DskipTests -Pbuild-release
 ```
 
-The build output consists of several archive files located under `/target/output`
+The build output consists of several archive files with `sha512` checksum located under `/target/output`
 
-* `bifromq-<VERSION>.tar.gz`
-* `bifromq-<VERSION>-windows.zip`
+* `apache-bifromq-<VERSION>-src.tar.gz` 
+* `apache-bifromq-<VERSION>.tar.gz`
+* `apache-bifromq-<VERSION>-windows.zip`
+
+#### Native TLS options
+
+* Default binary bundles `netty-tcnative-classes` only; if system OpenSSL is unavailable, TLS falls back to JDK TLS automatically.
+* To build with system OpenSSL (requires OpenSSL installed on the host):
+  * `mvn -Pbuild-release -Pwith-tcnative -Dtcnative.classifier=<your_platform_classifier> clean verify -DskipTests`
+    * Example classifiers: `linux-x86_64`, `linux-aarch_64`, `osx-aarch_64`, `osx-x86_64`, `windows-x86_64`.
+* To build with BoringSSL static bundle
+  * `mvn -Pbuild-release -Pwith-boringssl-static -Dtcnative.classifier=<your_platform_classifier> clean verify -DskipTests`
+    * Example classifiers: `linux-x86_64`, `linux-aarch_64`, `osx-aarch_64`, `osx-x86_64`, `windows-x86_64`.
 
 #### Running the tests
 
@@ -140,9 +152,20 @@ Note: The tests may take some time to finish
 mvn test
 ```
 
+#### Build the Docker Image
+With the binary `apache-bifromq-<version>.tar.gz` and its `.sha512` under `target/output`, build the Docker image using the helper script:
+```shell
+./release/docker-build.sh target/output/apache-bifromq-<version>.tar.gz
+```
+Optional: override the tag or target architecture:
+```shell
+./release/docker-build.sh -t apache-bifromq:<version> target/output/apache-bifromq-<version>.tar.gz
+./release/docker-build.sh -a arm64 target/output/apache-bifromq-<version>.tar.gz
+```
+
 ### Quick Start
 
-To quickly set up a BifroMQ server, extract the `bifromq-<VERSION>.tar.gz` file into a directory. You will see the
+To quickly set up an Apache BifroMQ server, extract the `apache-bifromq-<VERSION>.tar.gz` file into a directory. You will see the
 following directory structure:
 
 ```
@@ -169,7 +192,7 @@ in a self-explanatory manner. By default, the standalone server stores persisten
 
 ### Plugin Development
 
-To jump start your BifroMQ plugin development, execute the following Maven command:
+To jump start your Apache BifroMQ plugin development, execute the following Maven command:
 
 ```
 mvn archetype:generate \
@@ -187,7 +210,7 @@ mvn archetype:generate \
 
 Replace `<YOUR_GROUP_ID>`, `<YOUR_ARTIFACT_ID>`, `<YOUR_PROJECT_VERSION>`, `<YOUR_PLUGIN_CLASS_NAME>`,
 and `< YOUR_PLUGIN_CONTEXT_CLASS_NAME>` with your specific details. This command generates a ready-to-build multi-module
-project structured for BifroMQ plugin development.
+project structured for Apache BifroMQ plugin development.
 
 Important Note: The archetype version should be 3.2.0 or higher as the archetype is compatible starting from version
 3.2.0. Ensure that <BIFROMQ_VERSION> is set accordingly.
@@ -202,7 +225,7 @@ The standard cluster deployment mode is suitable for small to medium-sized produ
 reliability and scalability. It comprises several fully functional standalone nodes working together as a logical MQTT
 broker
 instance, ensuring high availability. You can also scale up the concurrent mqtt connection workload by adding more
-nodes, while some types of messaging related workload are not horizontal scalable in this mode.
+nodes, while some types of messaging related workload are not horizontally scalable in this mode.
 
 #### Independent Workload Cluster
 
@@ -212,7 +235,7 @@ of workload. These sub-clusters work together coherently to form a logical MQTT 
 
 ## User Community
 
-We welcome you to connect with the BifroMQ community:
+We welcome you to connect with the Apache BifroMQ community:
 
 * **[Mailing Lists](https://bifromq.apache.org/community/#about-the-mailing-list)** – Stay informed, discuss development topics, and collaborate with other contributors via our public mailing lists.
 * **[Discord server](https://discord.gg/Pfs3QRadRB)** – Join us to chat, share ideas, and get real-time updates on ongoing work.

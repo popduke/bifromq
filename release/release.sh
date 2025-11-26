@@ -23,13 +23,15 @@
 # Print usage information
 usage() {
   cat <<EOF
-Usage: $(basename "$0") <release-branch> [<svn-username> <svn-password>]
+Usage: $(basename "$0") <release-branch> [--upload] [--gpg-passphrase <pass>] [<svn-username> <svn-password>]
   <release-branch>   Release branch in format release-v<major>.<minor>.x (e.g. release-v4.0.x)
+  --upload           (Optional) Upload artifacts to Apache dist/dev SVN
+  --gpg-passphrase   (Optional) GPG passphrase used for signing
   <svn-username>      (Optional) SVN username for committing to Apache Dev repo
   <svn-password>      (Optional) SVN password for committing to Apache Dev repo
 
 Example:
-  $(basename "$0") release-v4.0.x my_user my_password
+  $(basename "$0") release-v1.0.x-incubating --upload my_user my_password
 EOF
 }
 
@@ -42,90 +44,152 @@ fi
 set -e
 
 # =====================================================
-# BifroMQ ASF Release Tool
+# Apache BifroMQ Release Tool
 # =====================================================
 
 PROJECT_NAME="bifromq"
 ASF_SVN_DEV_URL="https://dist.apache.org/repos/dist/dev/incubator/${PROJECT_NAME}"
 
 BRANCH="$1"
-USERNAME=$2
-PASSWORD=$3
+UPLOAD=false
+USERNAME=""
+PASSWORD=""
+GPG_PASSPHRASE=""
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
-if [[ ! "$BRANCH" =~ ^release-v([0-9]+)\.([0-9]+)\.x$ ]]; then
-  echo "ERROR: Branch name must follow release-v<major>.<minor>.x format (e.g. release-v4.0.x)"
+verify_gpg_access() {
+  local pass="$1"
+  local sign_cmd=(gpg --armor --batch --yes --pinentry-mode loopback --sign)
+  if [[ -n "$pass" ]]; then
+    if ! echo test | "${sign_cmd[@]}" --passphrase "$pass" >/dev/null 2>&1; then
+      echo "ERROR: Provided GPG passphrase is invalid or key is not accessible."
+      exit 1
+    fi
+  else
+    if ! echo test | "${sign_cmd[@]}" >/dev/null 2>&1; then
+      echo "ERROR: GPG passphrase required. Provide it via --gpg-passphrase or ensure gpg-agent has it cached."
+      exit 1
+    fi
+  fi
+}
+
+shift
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --upload)
+      UPLOAD=true
+      shift
+      ;;
+    --gpg-passphrase)
+      shift
+      if [[ -z "${1:-}" ]]; then
+        echo "ERROR: --gpg-passphrase requires a value"
+        usage
+        exit 1
+      fi
+      GPG_PASSPHRASE="$1"
+      shift
+      ;;
+    *)
+      if [[ -z "$USERNAME" ]]; then
+        USERNAME="$1"
+      elif [[ -z "$PASSWORD" ]]; then
+        PASSWORD="$1"
+      else
+        echo "ERROR: Too many arguments"
+        usage
+        exit 1
+      fi
+      shift
+      ;;
+  esac
+done
+
+if [[ ! "$BRANCH" =~ ^release-v([0-9]+)\.([0-9]+)\.x.*$ ]]; then
+  echo "ERROR: Branch name must follow release-v<major>.<minor>.x format (e.g. release-v4.0.x or release-v1.0.0-incubating)"
   exit 1
 fi
 
-MAJOR="${BASH_REMATCH[1]}"
-MINOR="${BASH_REMATCH[2]}"
-MAJOR_MINOR="${MAJOR}.${MINOR}"
-
-WORKDIR=$(pwd)
+WORKDIR="${SCRIPT_DIR}/output"
+mkdir -p "$WORKDIR"
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
 command -v gpg >/dev/null || { echo "GPG is required but not installed."; exit 1; }
+export GPG_TTY=${GPG_TTY:-$(tty)}
+gpg --list-secret-keys --with-colons | grep -q '^sec' || { echo "ERROR: No GPG secret key found for signing."; exit 1; }
+verify_gpg_access "$GPG_PASSPHRASE"
 
-echo "Cloning repository..."
+echo "Cloning repository to temp dir..."
 cd "$TMPDIR"
 git clone https://github.com/apache/${PROJECT_NAME}.git repo
 cd repo
 git checkout "$BRANCH"
 
-echo "Locating latest tag for branch $BRANCH..."
-LATEST_TAG=$(git tag --list "v${MAJOR_MINOR}.*" --sort=-v:refname | head -n 1)
-if [ -z "$LATEST_TAG" ]; then
-  echo "ERROR: No matching tag found."
+echo "Reading revision from POM..."
+REVISION=$(xmllint --xpath "string(//*[local-name()='project']/*[local-name()='properties']/*[local-name()='revision'])" pom.xml)
+if [[ -z "$REVISION" ]]; then
+  echo "ERROR: Cannot read revision from pom.xml"
   exit 1
 fi
-echo "Found tag: $LATEST_TAG"
-git checkout "$LATEST_TAG"
 
-# remove prefix 'v' from tag
-VERSION="${LATEST_TAG#v}"
-
-POM_VERSION=$(xmllint --xpath "string(//project/properties/revision)" pom.xml)
-if [ "$POM_VERSION" != "$VERSION" ]; then
-  echo "ERROR: POM revision ($POM_VERSION) doesn't match tag version ($VERSION)"
+TAG="v${REVISION}"
+if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+  echo "ERROR: Tag ${TAG} not found"
   exit 1
 fi
+
+if ! git merge-base --is-ancestor "${TAG}" "${BRANCH}"; then
+  echo "ERROR: Tag ${TAG} is not reachable from branch ${BRANCH}"
+  exit 1
+fi
+
+echo "Checking out tag ${TAG}..."
+git checkout "${TAG}"
 
 echo "ASF required file check..."
 for f in LICENSE NOTICE DISCLAIMER; do
   [ -f "$f" ] || { echo "Missing $f file."; exit 1; }
 done
 
-SRC_DIR="${PROJECT_NAME}-${VERSION}-src"
-SRC_TARBALL="${SRC_DIR}.tar.gz"
-git archive --format=tar.gz --prefix="${SRC_DIR}/" -o "$WORKDIR/$SRC_TARBALL" "$LATEST_TAG"
+echo "Running Maven build (build-release profile)..."
+echo "You may be prompted for GPG passphrase by gpg-agent/pinentry."
+MVN_ARGS=(-Pbuild-release -DskipTests)
+if [[ -n "$GPG_PASSPHRASE" ]]; then
+  MVN_ARGS+=("-Dgpg.passphrase=${GPG_PASSPHRASE}")
+fi
+mvn "${MVN_ARGS[@]}" clean verify
 
-echo "Building binary via Maven..."
-mvn clean package -DskipTests
-
-cd "$WORKDIR"
-cp "$TMPDIR/repo/target/output/bifromq-*.*" "${WORKDIR}"
-
-cd "$WORKDIR"
-find . -maxdepth 1 -type f ! -name '*.asc' ! -name '*.sha512' -print0 | while IFS= read -r -d '' ARTIFACT; do
-  gpg --armor --output "${ARTIFACT}.asc" --detach-sign "$ARTIFACT"
-  shasum -a 512 "$ARTIFACT" > "${ARTIFACT}.sha512"
+cd "$TMPDIR/repo"
+ARTIFACTS=(target/output/apache-bifromq-*.tar.gz target/output/apache-bifromq-*.zip)
+ls "${ARTIFACTS[@]}" 2>/dev/null || { echo "No artifacts found under target/output"; exit 1; }
+for f in target/output/*; do
+  if [[ -f "$f" ]]; then
+    cp "$f" "$WORKDIR"
+  fi
 done
 
-SVN_TMP=$(mktemp -d)
-svn checkout "$ASF_SVN_DEV_URL" "$SVN_TMP"
-mkdir -p "$SVN_TMP/$VERSION"
-cp "$WORKDIR"/* "$SVN_TMP/$VERSION/"
-cd "$SVN_TMP"
-svn add --force "$VERSION"
-svn status
+echo "Signing artifacts..."
+bash "${SCRIPT_DIR}/sign-artifacts.sh" "$WORKDIR" "$GPG_PASSPHRASE"
 
-if [ "$USERNAME" = "" ]; then
-  svn commit -m "Add release ${VERSION}" || exit
+if [ "$UPLOAD" = true ]; then
+  SVN_TMP=$(mktemp -d)
+  svn checkout "$ASF_SVN_DEV_URL" "$SVN_TMP"
+  mkdir -p "$SVN_TMP/${REVISION}"
+  cp target/output/* "$SVN_TMP/${REVISION}/"
+  cd "$SVN_TMP"
+  svn add --force "${REVISION}"
+  svn status
+  if [ "$USERNAME" = "" ]; then
+    svn commit -m "Add release ${REVISION}" || exit
+  else
+    svn commit -m "Add release ${REVISION}" --username "${USERNAME}" --password "${PASSWORD}" || exit
+  fi
+  echo "Artifacts uploaded to SVN dev: ${REVISION}"
 else
-  svn commit -m "Add release ${VERSION}" --username "${USERNAME}" --password "${PASSWORD}" || exit
+  echo "Artifacts generated under target/output and copied to $WORKDIR. Use --upload to push to SVN."
 fi
 
 echo "========================================================="
-echo "BifroMQ release $VERSION has been successfully created."
+echo "Apache BifroMQ release ${REVISION} build completed."
 echo "========================================================="
