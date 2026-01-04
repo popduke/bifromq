@@ -82,6 +82,8 @@ public enum TenantMetric {
     MqttRouteCacheHitCount("mqtt.route.cache.hit.count", Meter.Type.COUNTER, true),
     MqttRouteCacheEvictCount("mqtt.route.cache.evict.count", Meter.Type.COUNTER, true),
     MqttRouteCacheMissCount("mqtt.route.cache.miss.count", Meter.Type.COUNTER, true),
+    MqttRouteCachePatchLatency("mqtt.route.cache.patch.latency", Meter.Type.TIMER),
+    MqttRouteCacheLoadLatency("mqtt.route.cache.load.latency", Meter.Type.TIMER),
     // retain related
     MqttIngressRetainBytes("mqtt.ingress.retain.bytes", Meter.Type.DISTRIBUTION_SUMMARY),
     MqttRetainedBytes("mqtt.retained.bytes", Meter.Type.DISTRIBUTION_SUMMARY),

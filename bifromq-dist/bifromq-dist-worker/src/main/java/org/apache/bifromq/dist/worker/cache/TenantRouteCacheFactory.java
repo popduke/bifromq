@@ -19,9 +19,6 @@
 
 package org.apache.bifromq.dist.worker.cache;
 
-import io.micrometer.core.instrument.Metrics;
-import io.micrometer.core.instrument.Tags;
-import io.micrometer.core.instrument.Timer;
 import java.time.Duration;
 import java.util.concurrent.Executor;
 import java.util.function.Supplier;
@@ -35,7 +32,6 @@ class TenantRouteCacheFactory implements ITenantRouteCacheFactory {
     private final IEventCollector eventCollector;
     private final Executor matchExecutor;
     private final Supplier<IKVRangeRefreshableReader> readerSupplier;
-    private final Timer internalMatchTimer;
     private final Duration expiry;
     private final Duration fanoutCheckInterval;
 
@@ -44,19 +40,14 @@ class TenantRouteCacheFactory implements ITenantRouteCacheFactory {
                                    IEventCollector eventCollector,
                                    Duration expiry,
                                    Duration fanoutCheckInterval,
-                                   Executor matchExecutor,
-                                   String... tags) {
+                                   Executor matchExecutor) {
         this.settingProvider = settingProvider;
         this.eventCollector = eventCollector;
         this.matchExecutor = matchExecutor;
         this.readerSupplier = readerSupplier;
         this.expiry = expiry;
         this.fanoutCheckInterval = fanoutCheckInterval;
-        internalMatchTimer = Timer.builder("dist.match.internal")
-            .tags(Tags.of(tags))
-            .register(Metrics.globalRegistry);
     }
-
 
     @Override
     public Duration expiry() {
@@ -66,12 +57,11 @@ class TenantRouteCacheFactory implements ITenantRouteCacheFactory {
     @Override
     public ITenantRouteCache create(KVRangeId rangeId, String tenantId) {
         return new TenantRouteCache(rangeId, tenantId,
-            new TenantRouteMatcher(tenantId, readerSupplier, eventCollector, internalMatchTimer),
+            new TenantRouteMatcher(tenantId, readerSupplier, eventCollector),
             settingProvider, expiry, fanoutCheckInterval, matchExecutor);
     }
 
     @Override
     public void close() {
-        Metrics.globalRegistry.remove(internalMatchTimer);
     }
 }

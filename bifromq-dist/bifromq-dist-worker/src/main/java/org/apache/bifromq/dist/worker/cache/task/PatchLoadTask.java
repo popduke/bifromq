@@ -23,24 +23,23 @@ import java.util.concurrent.CompletableFuture;
 import org.apache.bifromq.dist.worker.cache.IMatchedRoutes;
 import org.apache.bifromq.dist.worker.cache.RouteCacheKey;
 
-public class LoadEntryTask extends TenantRouteCacheTask {
-    public final String topic;
+public class PatchLoadTask extends TenantRouteCacheTask {
     public final RouteCacheKey cacheKey;
     public final long startSeq;
-    public final CompletableFuture<IMatchedRoutes> future = new CompletableFuture<>();
+    public final CompletableFuture<IMatchedRoutes> loadFuture;
 
-    private LoadEntryTask(String topic, RouteCacheKey cacheKey, long startSeq) {
-        this.topic = topic;
+    private PatchLoadTask(RouteCacheKey cacheKey, long startSeq, CompletableFuture<IMatchedRoutes> loadFuture) {
         this.cacheKey = cacheKey;
         this.startSeq = startSeq;
+        this.loadFuture = loadFuture;
     }
 
-    public static LoadEntryTask of(String topic, RouteCacheKey cacheKey, long startSeq) {
-        return new LoadEntryTask(topic, cacheKey, startSeq);
+    public static PatchLoadTask of(RouteCacheKey cacheKey, long startSeq, CompletableFuture<IMatchedRoutes> loadFuture) {
+        return new PatchLoadTask(cacheKey, startSeq, loadFuture);
     }
 
     @Override
-    public final CacheTaskType type() {
-        return CacheTaskType.Load;
+    public CacheTaskType type() {
+        return CacheTaskType.PatchLoad;
     }
 }

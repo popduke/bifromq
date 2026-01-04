@@ -44,7 +44,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.bifromq.basekv.proto.Boundary;
 import org.apache.bifromq.basekv.proto.KVRangeId;
 import org.apache.bifromq.basekv.store.api.IKVRangeRefreshableReader;
-import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
 import org.apache.bifromq.dist.worker.cache.task.RefreshEntriesTask;
 import org.apache.bifromq.dist.worker.schema.cache.Matching;
 import org.apache.bifromq.plugin.eventcollector.IEventCollector;
@@ -69,7 +68,7 @@ public class SubscriptionCache implements ISubscriptionCache {
         this(id, new TenantRouteCacheFactory(rangeReaderProvider, settingProvider, eventCollector,
             Duration.ofSeconds(DistTopicMatchExpirySeconds.INSTANCE.get()),
             Duration.ofSeconds(DistCachedRoutesFanoutCheckIntervalSeconds.INSTANCE.get()),
-            matchExecutor, "id", KVRangeIdUtil.toString(id)), Ticker.systemTicker());
+            matchExecutor), Ticker.systemTicker());
     }
 
     public SubscriptionCache(KVRangeId id,

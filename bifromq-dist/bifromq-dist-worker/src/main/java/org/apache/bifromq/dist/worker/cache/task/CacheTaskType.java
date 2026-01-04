@@ -20,5 +20,5 @@
 package org.apache.bifromq.dist.worker.cache.task;
 
 public enum CacheTaskType {
-    Load, Reload, AddRoutes, RemoveRoutes
+    Load, Reload, AddRoutes, RemoveRoutes, PatchLoad
 }

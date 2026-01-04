@@ -36,9 +36,10 @@ import static org.testng.Assert.assertEquals;
 import static org.testng.Assert.assertFalse;
 import static org.testng.Assert.assertTrue;
 
-import com.github.benmanes.caffeine.cache.AsyncLoadingCache;
 import com.github.benmanes.caffeine.cache.Ticker;
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Map;
 import java.util.NavigableMap;
 import java.util.Set;
@@ -50,12 +51,12 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.bifromq.basekv.proto.KVRangeId;
 import org.apache.bifromq.basekv.utils.KVRangeIdUtil;
 import org.apache.bifromq.dist.worker.Comparators;
 import org.apache.bifromq.dist.worker.MeterTest;
-import org.apache.bifromq.dist.worker.TopicIndex;
 import org.apache.bifromq.dist.worker.cache.task.AddRoutesTask;
 import org.apache.bifromq.dist.worker.cache.task.RemoveRoutesTask;
 import org.apache.bifromq.dist.worker.schema.cache.GroupMatching;
@@ -65,6 +66,7 @@ import org.apache.bifromq.metrics.TenantMetric;
 import org.apache.bifromq.plugin.eventcollector.IEventCollector;
 import org.apache.bifromq.plugin.settingprovider.ISettingProvider;
 import org.apache.bifromq.plugin.settingprovider.Setting;
+import org.apache.bifromq.sysprops.props.DistMaxCachedRoutesPerTenant;
 import org.apache.bifromq.type.RouteMatcher;
 import org.apache.bifromq.util.TopicUtil;
 import org.testng.annotations.AfterMethod;
@@ -109,7 +111,8 @@ public class TenantRouteCacheTest extends MeterTest {
 
     @Test
     public void shouldLoadAndIndexRoutesOnFirstAccess() {
-        TenantRouteCache cache = newCache(directExecutor());
+        executorToShutdown = Executors.newSingleThreadExecutor();
+        TenantRouteCache cache = newCache(executorToShutdown);
         NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
         IMatchedRoutes matchedRoutes = mockRoutesWithBackingSet(10, 5, Set.of(existing));
 
@@ -120,7 +123,8 @@ public class TenantRouteCacheTest extends MeterTest {
         Set<Matching> result = cache.getMatch(TOPIC, FULL_BOUNDARY).join();
 
         assertEquals(result, Set.of(existing));
-        assertTrue(cache.isCached(TopicUtil.from(TOPIC).getFilterLevelList()));
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> cache.isCached(TopicUtil.from(TOPIC).getFilterLevelList()));
         verify(matcher, times(1)).matchAll(eq(Set.of(TOPIC)), eq(10), eq(5));
     }
 
@@ -185,7 +189,163 @@ public class TenantRouteCacheTest extends MeterTest {
     }
 
     @Test
+    public void shouldDeferAddRoutesUntilReloadBatchComplete() {
+        ManualExecutor executor = new ManualExecutor();
+        TenantRouteCache cache = newCache(executor);
+        String topicA = "sensor/temp";
+        String topicB = "sensor/humidity";
+
+        NormalMatching existingA = normalMatching(TENANT_ID, topicA, 1, "receiverA", "delivererA", 1);
+        NormalMatching existingB = normalMatching(TENANT_ID, topicB, 1, "receiverB", "delivererB", 1);
+        IMatchedRoutes initialA = mockRoutesWithBackingSet(topicA, 1, 5, Set.of(existingA));
+        IMatchedRoutes initialB = mockRoutesWithBackingSet(topicB, 1, 5, Set.of(existingB));
+        IMatchedRoutes reloadedA = mockRoutesWithBackingSet(topicA, 2, 5, Set.of(existingA));
+        IMatchedRoutes reloadedB = mockRoutesWithBackingSet(topicB, 2, 5, Set.of(existingB));
+
+        when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID)))
+            .thenReturn(1, 1, 2, 2);
+        when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
+
+        Map<String, AtomicInteger> callsByTopic = new ConcurrentHashMap<>();
+        when(matcher.matchAll(any(), anyInt(), anyInt())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Set<String> topics = invocation.getArgument(0);
+            String topic = topics.iterator().next();
+            int call = callsByTopic.computeIfAbsent(topic, ignore -> new AtomicInteger()).incrementAndGet();
+            if (topic.equals(topicA)) {
+                return call == 1 ? Map.of(topicA, initialA) : Map.of(topicA, reloadedA);
+            }
+            return call == 1 ? Map.of(topicB, initialB) : Map.of(topicB, reloadedB);
+        });
+
+        cache.getMatch(topicA, FULL_BOUNDARY);
+        cache.getMatch(topicB, FULL_BOUNDARY);
+        executor.runAll();
+
+        assertTrue(cache.isCached(TopicUtil.from(topicA).getFilterLevelList()));
+        assertTrue(cache.isCached(TopicUtil.from(topicB).getFilterLevelList()));
+
+        ticker.advance(FANOUT_CHECK.plusMillis(1));
+        cache.getMatch(topicA, FULL_BOUNDARY);
+        cache.getMatch(topicB, FULL_BOUNDARY);
+
+        NormalMatching newRoute = normalMatching(TENANT_ID, topicA, 1, "receiverC", "delivererC", 2);
+        NavigableMap<RouteMatcher, Set<Matching>> additions = new TreeMap<>(Comparators.RouteMatcherComparator);
+        additions.put(newRoute.matcher, Set.of(newRoute));
+        cache.refresh(AddRoutesTask.of(additions));
+
+        int guard = 20;
+        while (guard-- > 0) {
+            int countA = callCount(callsByTopic, topicA);
+            int countB = callCount(callsByTopic, topicB);
+            if (countA >= 2 && countB >= 2) {
+                break;
+            }
+            assertFalse(initialA.routes().contains(newRoute));
+            assertFalse(reloadedA.routes().contains(newRoute));
+            executor.runNext();
+        }
+        assertTrue(callCount(callsByTopic, topicA) >= 2);
+        assertTrue(callCount(callsByTopic, topicB) >= 2);
+        assertFalse(reloadedA.routes().contains(newRoute));
+
+        executor.runAll();
+        assertTrue(reloadedA.routes().contains(newRoute));
+    }
+
+    @Test
+    public void shouldReloadInParallelAcrossKeys() {
+        ManualExecutor executor = new ManualExecutor();
+        TenantRouteCache cache = newCache(executor);
+        String topicA = "sensor/temp";
+        String topicB = "sensor/humidity";
+
+        NormalMatching existingA = normalMatching(TENANT_ID, topicA, 1, "receiverA", "delivererA", 1);
+        NormalMatching existingB = normalMatching(TENANT_ID, topicB, 1, "receiverB", "delivererB", 1);
+        IMatchedRoutes initialA = mockRoutesWithBackingSet(topicA, 1, 5, Set.of(existingA));
+        IMatchedRoutes initialB = mockRoutesWithBackingSet(topicB, 1, 5, Set.of(existingB));
+        IMatchedRoutes reloadedA = mockRoutesWithBackingSet(topicA, 2, 5, Set.of(existingA));
+        IMatchedRoutes reloadedB = mockRoutesWithBackingSet(topicB, 2, 5, Set.of(existingB));
+
+        when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID)))
+            .thenReturn(1, 1, 2, 2);
+        when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
+
+        Map<String, AtomicInteger> callsByTopic = new ConcurrentHashMap<>();
+        when(matcher.matchAll(any(), anyInt(), anyInt())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Set<String> topics = invocation.getArgument(0);
+            String topic = topics.iterator().next();
+            int call = callsByTopic.computeIfAbsent(topic, ignore -> new AtomicInteger()).incrementAndGet();
+            if (topic.equals(topicA)) {
+                return call == 1 ? Map.of(topicA, initialA) : Map.of(topicA, reloadedA);
+            }
+            return call == 1 ? Map.of(topicB, initialB) : Map.of(topicB, reloadedB);
+        });
+
+        cache.getMatch(topicA, FULL_BOUNDARY);
+        cache.getMatch(topicB, FULL_BOUNDARY);
+        executor.runAll();
+
+        assertTrue(cache.isCached(TopicUtil.from(topicA).getFilterLevelList()));
+        assertTrue(cache.isCached(TopicUtil.from(topicB).getFilterLevelList()));
+
+        ticker.advance(FANOUT_CHECK.plusMillis(1));
+        cache.getMatch(topicA, FULL_BOUNDARY);
+        cache.getMatch(topicB, FULL_BOUNDARY);
+
+        executor.runNext();
+        assertTrue(executor.pending() >= 2);
+        executor.runAll();
+        assertTrue(callCount(callsByTopic, topicA) >= 2);
+        assertTrue(callCount(callsByTopic, topicB) >= 2);
+    }
+
+    @Test
+    public void shouldSerializePatchLoadAndReloadForSameKey() {
+        ManualExecutor executor = new ManualExecutor();
+        TenantRouteCache cache = newCache(executor);
+        NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
+        IMatchedRoutes initial = mockRoutesWithBackingSet(TOPIC, 1, 5, Set.of(existing));
+        IMatchedRoutes reloaded = mockRoutesWithBackingSet(TOPIC, 2, 5, Set.of(existing));
+
+        AtomicInteger persistentFanoutCalls = new AtomicInteger();
+        when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID)))
+            .thenAnswer(invocation -> persistentFanoutCalls.getAndIncrement() == 0 ? 1 : 2);
+        when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
+
+        AtomicInteger matchCalls = new AtomicInteger();
+        CountDownLatch reloadStarted = new CountDownLatch(1);
+        when(matcher.matchAll(eq(Set.of(TOPIC)), anyInt(), anyInt())).thenAnswer(invocation -> {
+            int call = matchCalls.incrementAndGet();
+            if (call == 1) {
+                return Map.of(TOPIC, initial);
+            }
+            reloadStarted.countDown();
+            return Map.of(TOPIC, reloaded);
+        });
+
+        cache.getMatch(TOPIC, FULL_BOUNDARY);
+        executor.runNext();
+
+        ticker.advance(FANOUT_CHECK.plusMillis(1));
+        cache.getMatch(TOPIC, FULL_BOUNDARY);
+
+        boolean patchLoadDone = false;
+        int guard = 10;
+        while (guard-- > 0 && reloadStarted.getCount() > 0) {
+            executor.runNext();
+            if (cache.isCached(TopicUtil.from(TOPIC).getFilterLevelList())) {
+                patchLoadDone = true;
+            }
+        }
+        assertTrue(patchLoadDone);
+        assertEquals(reloadStarted.getCount(), 0);
+    }
+
+    @Test
     public void shouldApplyAddRoutesTask() {
+        executorToShutdown = Executors.newSingleThreadExecutor();
         NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
         IMatchedRoutes matchedRoutes = mockRoutesWithBackingSet(10, 5, Set.of(existing));
 
@@ -193,7 +353,7 @@ public class TenantRouteCacheTest extends MeterTest {
         when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
         when(matcher.matchAll(eq(Set.of(TOPIC)), eq(10), eq(5))).thenReturn(Map.of(TOPIC, matchedRoutes));
 
-        TenantRouteCache cache = newCache(directExecutor());
+        TenantRouteCache cache = newCache(executorToShutdown);
 
         assertTrue(cache.getMatch(TOPIC, FULL_BOUNDARY).join().contains(existing));
 
@@ -215,7 +375,8 @@ public class TenantRouteCacheTest extends MeterTest {
 
     @Test
     public void shouldApplyRemoveRoutesTask() {
-        TenantRouteCache cache = newCache(directExecutor());
+        executorToShutdown = Executors.newSingleThreadExecutor();
+        TenantRouteCache cache = newCache(executorToShutdown);
         NormalMatching normal = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
         GroupMatching removableGroup = unorderedGroupMatching(TENANT_ID, "sensor/#", "groupRemove",
             Map.of(receiverUrl(1, "receiverB", "delivererB"), 1L));
@@ -291,6 +452,173 @@ public class TenantRouteCacheTest extends MeterTest {
     }
 
     @Test
+    public void shouldReplayPatchLogDuringLoad() throws Exception {
+        executorToShutdown = Executors.newFixedThreadPool(2);
+        TenantRouteCache cache = newCache(executorToShutdown);
+        String otherTopic = "sensor/humidity";
+        NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
+        NormalMatching otherExisting = normalMatching(TENANT_ID, otherTopic, 1, "receiverX", "delivererX", 1);
+        IMatchedRoutes matchedRoutes = mockRoutesWithBackingSet(TOPIC, 10, 5, Set.of(existing));
+        IMatchedRoutes otherMatchedRoutes = mockRoutesWithBackingSet(otherTopic, 10, 5, Set.of(otherExisting));
+
+        CountDownLatch loadStarted = new CountDownLatch(1);
+        CountDownLatch allowLoad = new CountDownLatch(1);
+
+        when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID))).thenReturn(10);
+        when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
+        when(matcher.matchAll(any(), eq(10), eq(5))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Set<String> topics = invocation.getArgument(0);
+            String topic = topics.iterator().next();
+            if (TOPIC.equals(topic)) {
+                loadStarted.countDown();
+                if (!allowLoad.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("load timeout");
+                }
+                return Map.of(TOPIC, matchedRoutes);
+            }
+            if (otherTopic.equals(topic)) {
+                return Map.of(otherTopic, otherMatchedRoutes);
+            }
+            return Map.of();
+        });
+
+        cache.getMatch(otherTopic, FULL_BOUNDARY).join();
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> cache.isCached(TopicUtil.from(otherTopic).getFilterLevelList()));
+
+        CompletableFuture<Set<Matching>> future = cache.getMatch(TOPIC, FULL_BOUNDARY);
+        assertTrue(loadStarted.await(5, TimeUnit.SECONDS));
+
+        NormalMatching newNormal = normalMatching(TENANT_ID, "sensor/#", 1, "receiverB", "delivererB", 2);
+        NavigableMap<RouteMatcher, Set<Matching>> additions = new TreeMap<>(Comparators.RouteMatcherComparator);
+        additions.put(newNormal.matcher, Set.of(newNormal));
+        cache.refresh(AddRoutesTask.of(additions));
+
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> cache.getMatch(otherTopic, FULL_BOUNDARY).join().contains(newNormal));
+
+        allowLoad.countDown();
+
+        Set<Matching> initial = future.join();
+        assertTrue(initial.contains(existing));
+
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> cache.getMatch(TOPIC, FULL_BOUNDARY).join().contains(newNormal));
+    }
+
+    @Test
+    public void shouldReplayRemoveRoutesDuringLoad() throws Exception {
+        executorToShutdown = Executors.newFixedThreadPool(2);
+        TenantRouteCache cache = newCache(executorToShutdown);
+        String otherTopic = "sensor/humidity";
+        NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
+        NormalMatching wildcard = normalMatching(TENANT_ID, "sensor/#", 1, "receiverB", "delivererB", 2);
+        IMatchedRoutes matchedRoutes = mockRoutesWithBackingSet(TOPIC, 10, 5, Set.of(existing, wildcard));
+        IMatchedRoutes otherMatchedRoutes = mockRoutesWithBackingSet(otherTopic, 10, 5, Set.of(wildcard));
+
+        CountDownLatch loadStarted = new CountDownLatch(1);
+        CountDownLatch allowLoad = new CountDownLatch(1);
+
+        when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID))).thenReturn(10);
+        when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
+        when(matcher.matchAll(any(), eq(10), eq(5))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Set<String> topics = invocation.getArgument(0);
+            String topic = topics.iterator().next();
+            if (TOPIC.equals(topic)) {
+                loadStarted.countDown();
+                if (!allowLoad.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("load timeout");
+                }
+                return Map.of(TOPIC, matchedRoutes);
+            }
+            if (otherTopic.equals(topic)) {
+                return Map.of(otherTopic, otherMatchedRoutes);
+            }
+            return Map.of();
+        });
+
+        cache.getMatch(otherTopic, FULL_BOUNDARY).join();
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> cache.isCached(TopicUtil.from(otherTopic).getFilterLevelList()));
+
+        CompletableFuture<Set<Matching>> future = cache.getMatch(TOPIC, FULL_BOUNDARY);
+        assertTrue(loadStarted.await(5, TimeUnit.SECONDS));
+
+        NavigableMap<RouteMatcher, Set<Matching>> removals = new TreeMap<>(Comparators.RouteMatcherComparator);
+        removals.put(wildcard.matcher, Set.of(wildcard));
+        cache.refresh(RemoveRoutesTask.of(removals));
+
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> !cache.getMatch(otherTopic, FULL_BOUNDARY).join().contains(wildcard));
+
+        allowLoad.countDown();
+        future.join();
+
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> !cache.getMatch(TOPIC, FULL_BOUNDARY).join().contains(wildcard));
+    }
+
+    @Test
+    public void shouldRetainPatchLogForEarlierLoadAfterLaterLoadCompletes() throws Exception {
+        executorToShutdown = Executors.newFixedThreadPool(2);
+        TenantRouteCache cache = newCache(executorToShutdown);
+        String otherTopic = "sensor/humidity";
+        String laterTopic = "sensor/pressure";
+        NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
+        NormalMatching wildcard = normalMatching(TENANT_ID, "sensor/#", 1, "receiverB", "delivererB", 2);
+        IMatchedRoutes matchedRoutes = mockRoutesWithBackingSet(TOPIC, 10, 5, Set.of(existing, wildcard));
+        IMatchedRoutes otherMatchedRoutes = mockRoutesWithBackingSet(otherTopic, 10, 5, Set.of(wildcard));
+        IMatchedRoutes laterMatchedRoutes = mockRoutesWithBackingSet(laterTopic, 10, 5, Set.of());
+
+        CountDownLatch loadStarted = new CountDownLatch(1);
+        CountDownLatch allowLoad = new CountDownLatch(1);
+
+        when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID))).thenReturn(10);
+        when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
+        when(matcher.matchAll(any(), eq(10), eq(5))).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Set<String> topics = invocation.getArgument(0);
+            String topic = topics.iterator().next();
+            if (TOPIC.equals(topic)) {
+                loadStarted.countDown();
+                if (!allowLoad.await(5, TimeUnit.SECONDS)) {
+                    throw new IllegalStateException("load timeout");
+                }
+                return Map.of(TOPIC, matchedRoutes);
+            }
+            if (otherTopic.equals(topic)) {
+                return Map.of(otherTopic, otherMatchedRoutes);
+            }
+            if (laterTopic.equals(topic)) {
+                return Map.of(laterTopic, laterMatchedRoutes);
+            }
+            return Map.of();
+        });
+
+        cache.getMatch(otherTopic, FULL_BOUNDARY).join();
+
+        CompletableFuture<Set<Matching>> future = cache.getMatch(TOPIC, FULL_BOUNDARY);
+        assertTrue(loadStarted.await(5, TimeUnit.SECONDS));
+
+        NavigableMap<RouteMatcher, Set<Matching>> removals = new TreeMap<>(Comparators.RouteMatcherComparator);
+        removals.put(wildcard.matcher, Set.of(wildcard));
+        cache.refresh(RemoveRoutesTask.of(removals));
+
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> !cache.getMatch(otherTopic, FULL_BOUNDARY).join().contains(wildcard));
+
+        assertFalse(cache.getMatch(laterTopic, FULL_BOUNDARY).join().contains(wildcard));
+
+        allowLoad.countDown();
+        future.join();
+
+        await().atMost(Duration.ofSeconds(5))
+            .until(() -> !cache.getMatch(TOPIC, FULL_BOUNDARY).join().contains(wildcard));
+    }
+
+    @Test
     public void shouldDestroyMeters() {
         TenantRouteCache cache = new TenantRouteCache(RANGE_ID, TENANT_ID, matcher, settingProvider, EXPIRY,
             FANOUT_CHECK,
@@ -359,13 +687,14 @@ public class TenantRouteCacheTest extends MeterTest {
     @Test
     public void shouldBoundZeroRouteTopicsByMaxWeight() {
         // Configure a small max cached routes to validate bounding behavior
-        String propKey = org.apache.bifromq.sysprops.props.DistMaxCachedRoutesPerTenant.INSTANCE.propKey();
+        String propKey = DistMaxCachedRoutesPerTenant.INSTANCE.propKey();
         String original = System.getProperty(propKey);
         try {
             System.setProperty(propKey, String.valueOf(10));
-            org.apache.bifromq.sysprops.props.DistMaxCachedRoutesPerTenant.INSTANCE.resolve();
+            DistMaxCachedRoutesPerTenant.INSTANCE.resolve();
 
-            TenantRouteCache cache = newCache(directExecutor());
+            executorToShutdown = Executors.newSingleThreadExecutor();
+            TenantRouteCache cache = newCache(executorToShutdown);
 
             // All topics have no matching routes (weight should be at least 1 after fix)
             IMatchedRoutes emptyRoutes = mockRoutesWithBackingSet(10, 10, Set.of());
@@ -373,7 +702,7 @@ public class TenantRouteCacheTest extends MeterTest {
             when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(10);
             when(matcher.matchAll(any(), anyInt(), anyInt())).thenAnswer(invocation -> {
                 @SuppressWarnings("unchecked")
-                Set<String> topics = (Set<String>) invocation.getArgument(0);
+                Set<String> topics = invocation.getArgument(0);
                 String t = topics.iterator().next();
                 return Map.of(t, emptyRoutes);
             });
@@ -385,87 +714,140 @@ public class TenantRouteCacheTest extends MeterTest {
                 cache.getMatch(topic, FULL_BOUNDARY).join();
             }
 
-            // Inspect internal cache size and index coverage
-            var routesCacheField = TenantRouteCache.class.getDeclaredField("routesCache");
-            routesCacheField.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            com.github.benmanes.caffeine.cache.AsyncLoadingCache<RouteCacheKey, IMatchedRoutes> routesCache =
-                (com.github.benmanes.caffeine.cache.AsyncLoadingCache<RouteCacheKey, IMatchedRoutes>)
-                    routesCacheField.get(cache);
-            long cached = routesCache.synchronous().estimatedSize();
-            // With weight=1 per entry, estimated size should be bounded by 10 (allow small overhead for race) 
-            assertTrue(cached <= 12, "Cache size should be bounded by max weight");
+            await().atMost(Duration.ofSeconds(5)).until(() -> {
+                int cached = 0;
+                for (int i = 0; i < total; i++) {
+                    String topic = "sensor/t" + i;
+                    if (cache.isCached(TopicUtil.from(topic).getFilterLevelList())) {
+                        cached++;
+                    }
+                }
+                return cached > 0 && cached <= 12;
+            });
 
-            var indexField = TenantRouteCache.class.getDeclaredField("index");
-            indexField.setAccessible(true);
-            @SuppressWarnings("unchecked")
-            org.apache.bifromq.dist.worker.TopicIndex<RouteCacheKey> index =
-                (org.apache.bifromq.dist.worker.TopicIndex<RouteCacheKey>) indexField.get(cache);
-
-            Set<RouteCacheKey> indexed = index.match("#");
-            assertTrue(indexed.size() <= 12, "Index entries should be bounded along with cache");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
+            int cached = 0;
+            for (int i = 0; i < total; i++) {
+                String topic = "sensor/t" + i;
+                if (cache.isCached(TopicUtil.from(topic).getFilterLevelList())) {
+                    cached++;
+                }
+            }
+            assertTrue(cached > 0); // Index entries should exist after load
+            assertTrue(cached <= 12); // Index entries should be bounded by max weight
         } finally {
             if (original == null) {
                 System.clearProperty(propKey);
             } else {
                 System.setProperty(propKey, original);
             }
-            org.apache.bifromq.sysprops.props.DistMaxCachedRoutesPerTenant.INSTANCE.resolve();
+            DistMaxCachedRoutesPerTenant.INSTANCE.resolve();
         }
     }
 
     @Test
-    public void shouldCleanupIndexOnExpiryAndExplicitInvalidation() throws Exception {
-        TenantRouteCache cache = newCache(directExecutor());
+    public void shouldCleanupIndexOnEviction() {
+        String propKey = DistMaxCachedRoutesPerTenant.INSTANCE.propKey();
+        String original = System.getProperty(propKey);
+        try {
+            System.setProperty(propKey, String.valueOf(1));
+            DistMaxCachedRoutesPerTenant.INSTANCE.resolve();
 
-        NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
-        IMatchedRoutes matchedRoutes = mockRoutesWithBackingSet(10, 5, Set.of(existing));
+            executorToShutdown = Executors.newSingleThreadExecutor();
+            TenantRouteCache cache = newCache(executorToShutdown);
 
-        when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID))).thenReturn(10);
-        when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
-        when(matcher.matchAll(eq(Set.of(TOPIC)), eq(10), eq(5))).thenReturn(Map.of(TOPIC, matchedRoutes));
+            String otherTopic = "sensor/humidity";
+            NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
+            NormalMatching otherExisting = normalMatching(TENANT_ID, otherTopic, 1, "receiverB", "delivererB", 1);
+            IMatchedRoutes matchedRoutes = mockRoutesWithBackingSet(TOPIC, 10, 5, Set.of(existing));
+            IMatchedRoutes otherMatchedRoutes = mockRoutesWithBackingSet(otherTopic, 10, 5, Set.of(otherExisting));
 
-        // 1) Initial load adds key into index
-        assertTrue(cache.getMatch(TOPIC, FULL_BOUNDARY).join().contains(existing));
+            when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID))).thenReturn(10);
+            when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
+            when(matcher.matchAll(any(), eq(10), eq(5))).thenAnswer(invocation -> {
+                @SuppressWarnings("unchecked")
+                Set<String> topics = invocation.getArgument(0);
+                String topic = topics.iterator().next();
+                if (TOPIC.equals(topic)) {
+                    return Map.of(TOPIC, matchedRoutes);
+                }
+                if (otherTopic.equals(topic)) {
+                    return Map.of(otherTopic, otherMatchedRoutes);
+                }
+                return Map.of();
+            });
 
-        // Reflect to access private fields: routesCache and index
-        var routesCacheField = TenantRouteCache.class.getDeclaredField("routesCache");
-        routesCacheField.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        AsyncLoadingCache<RouteCacheKey, IMatchedRoutes> routesCache = (AsyncLoadingCache<RouteCacheKey, IMatchedRoutes>)
-            routesCacheField.get(cache);
+            assertTrue(cache.getMatch(TOPIC, FULL_BOUNDARY).join().contains(existing));
+            await().atMost(Duration.ofSeconds(5))
+                .until(() -> cache.isCached(TopicUtil.from(TOPIC).getFilterLevelList()));
 
-        var indexField = TenantRouteCache.class.getDeclaredField("index");
-        indexField.setAccessible(true);
-        @SuppressWarnings("unchecked")
-        TopicIndex<RouteCacheKey> index = (TopicIndex<RouteCacheKey>) indexField.get(cache);
+            assertTrue(cache.getMatch(otherTopic, FULL_BOUNDARY).join().contains(otherExisting));
+            await().atMost(Duration.ofSeconds(5)).until(() -> {
+                boolean firstCached = cache.isCached(TopicUtil.from(TOPIC).getFilterLevelList());
+                boolean secondCached = cache.isCached(TopicUtil.from(otherTopic).getFilterLevelList());
+                return !firstCached && secondCached;
+            });
+        } finally {
+            if (original == null) {
+                System.clearProperty(propKey);
+            } else {
+                System.setProperty(propKey, original);
+            }
+            DistMaxCachedRoutesPerTenant.INSTANCE.resolve();
+        }
+    }
 
-        // Ensure index has exactly one key for the topic
-        Set<RouteCacheKey> initialKeys = index.get(TOPIC);
-        assertEquals(initialKeys.size(), 1);
-        RouteCacheKey firstKey = initialKeys.iterator().next();
+    @Test
+    public void shouldSkipIndexingWhenEvictedBeforePatchLoad() {
+        String propKey = DistMaxCachedRoutesPerTenant.INSTANCE.propKey();
+        String original = System.getProperty(propKey);
+        try {
+            System.setProperty(propKey, String.valueOf(1));
+            DistMaxCachedRoutesPerTenant.INSTANCE.resolve();
 
-        // 2) Expire by advancing ticker and forcing cleanup
-        ticker.advance(EXPIRY.plusMillis(1));
-        routesCache.synchronous().cleanUp();
+            ManualExecutor executor = new ManualExecutor();
+            TenantRouteCache cache = newCache(executor);
 
-        // After expiry cleanup, the old key should be removed from both cache and index
-        assertFalse(routesCache.synchronous().asMap().containsKey(firstKey));
-        assertFalse(index.get(TOPIC).contains(firstKey));
+            String otherTopic = "sensor/humidity";
+            NormalMatching existing = normalMatching(TENANT_ID, TOPIC, 1, "receiverA", "delivererA", 1);
+            NormalMatching otherExisting = normalMatching(TENANT_ID, otherTopic, 1, "receiverB", "delivererB", 1);
+            IMatchedRoutes matchedRoutes = mockRoutesWithBackingSet(TOPIC, 10, 5, Set.of(existing));
+            IMatchedRoutes otherMatchedRoutes = mockRoutesWithBackingSet(otherTopic, 10, 5, Set.of(otherExisting));
 
-        // 3) Load again to have a fresh key, then explicitly invalidate it
-        cache.getMatch(TOPIC, FULL_BOUNDARY).join();
-        Set<RouteCacheKey> afterReloadKeys = index.get(TOPIC);
-        assertEquals(afterReloadKeys.size(), 1);
-        RouteCacheKey secondKey = afterReloadKeys.iterator().next();
+            when(settingProvider.provide(eq(Setting.MaxPersistentFanout), eq(TENANT_ID))).thenReturn(10);
+            when(settingProvider.provide(eq(Setting.MaxGroupFanout), eq(TENANT_ID))).thenReturn(5);
+            when(matcher.matchAll(any(), eq(10), eq(5))).thenAnswer(invocation -> {
+                @SuppressWarnings("unchecked")
+                Set<String> topics = invocation.getArgument(0);
+                String topic = topics.iterator().next();
+                if (TOPIC.equals(topic)) {
+                    return Map.of(TOPIC, matchedRoutes);
+                }
+                if (otherTopic.equals(topic)) {
+                    return Map.of(otherTopic, otherMatchedRoutes);
+                }
+                return Map.of();
+            });
 
-        // Explicit invalidation should trigger removalListener and clean index
-        routesCache.synchronous().invalidate(secondKey);
+            CompletableFuture<Set<Matching>> first = cache.getMatch(TOPIC, FULL_BOUNDARY);
+            CompletableFuture<Set<Matching>> second = cache.getMatch(otherTopic, FULL_BOUNDARY);
 
-        // Ensure explicit invalidation cleaned the index entry
-        assertFalse(index.get(TOPIC).contains(secondKey));
+            executor.runNext();
+            executor.runNext();
+            executor.runAll();
+
+            first.join();
+            second.join();
+
+            assertFalse(cache.isCached(TopicUtil.from(TOPIC).getFilterLevelList()));
+            assertTrue(cache.isCached(TopicUtil.from(otherTopic).getFilterLevelList()));
+        } finally {
+            if (original == null) {
+                System.clearProperty(propKey);
+            } else {
+                System.setProperty(propKey, original);
+            }
+            DistMaxCachedRoutesPerTenant.INSTANCE.resolve();
+        }
     }
 
     private TenantRouteCache newCache(Executor executor) {
@@ -475,8 +857,21 @@ public class TenantRouteCacheTest extends MeterTest {
         return cache;
     }
 
+    private int callCount(Map<String, AtomicInteger> callsByTopic, String topic) {
+        AtomicInteger counter = callsByTopic.get(topic);
+        return counter == null ? 0 : counter.get();
+    }
+
     private IMatchedRoutes mockRoutesWithBackingSet(int maxPersistentFanout, int maxGroupFanout, Set<Matching> seed) {
-        MatchedRoutes routes = new MatchedRoutes(TENANT_ID, TOPIC, eventCollector, maxPersistentFanout, maxGroupFanout);
+        return mockRoutesWithBackingSet(TOPIC, maxPersistentFanout, maxGroupFanout, seed);
+    }
+
+    private IMatchedRoutes mockRoutesWithBackingSet(String topic,
+                                                    int maxPersistentFanout,
+                                                    int maxGroupFanout,
+                                                    Set<Matching> seed) {
+        MatchedRoutes routes = new MatchedRoutes(TENANT_ID, topic, eventCollector, maxPersistentFanout,
+            maxGroupFanout);
         for (Matching m : seed) {
             if (m instanceof NormalMatching nm) {
                 routes.addNormalMatching(nm);
@@ -497,6 +892,32 @@ public class TenantRouteCacheTest extends MeterTest {
 
         void advance(Duration duration) {
             nanos.addAndGet(duration.toNanos());
+        }
+    }
+
+    private static final class ManualExecutor implements Executor {
+        private final Deque<Runnable> tasks = new ArrayDeque<>();
+
+        @Override
+        public void execute(Runnable command) {
+            tasks.addLast(command);
+        }
+
+        int pending() {
+            return tasks.size();
+        }
+
+        void runNext() {
+            Runnable task = tasks.pollFirst();
+            if (task != null) {
+                task.run();
+            }
+        }
+
+        void runAll() {
+            while (!tasks.isEmpty()) {
+                runNext();
+            }
         }
     }
 }

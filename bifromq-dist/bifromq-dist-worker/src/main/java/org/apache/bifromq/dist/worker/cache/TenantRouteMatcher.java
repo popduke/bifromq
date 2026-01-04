@@ -29,7 +29,6 @@ import static org.apache.bifromq.dist.worker.schema.KVSchemaUtil.tenantBeginKey;
 import static org.apache.bifromq.dist.worker.schema.KVSchemaUtil.tenantRouteStartKey;
 
 import com.google.protobuf.ByteString;
-import io.micrometer.core.instrument.Timer;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -50,16 +49,13 @@ import org.apache.bifromq.util.TopicUtil;
 
 class TenantRouteMatcher implements ITenantRouteMatcher {
     private final String tenantId;
-    private final Timer timer;
     private final Supplier<IKVRangeRefreshableReader> kvReaderSupplier;
     private final IEventCollector eventCollector;
 
     public TenantRouteMatcher(String tenantId,
                               Supplier<IKVRangeRefreshableReader> kvReaderSupplier,
-                              IEventCollector eventCollector,
-                              Timer timer) {
+                              IEventCollector eventCollector) {
         this.tenantId = tenantId;
-        this.timer = timer;
         this.kvReaderSupplier = kvReaderSupplier;
         this.eventCollector = eventCollector;
     }
@@ -68,7 +64,6 @@ class TenantRouteMatcher implements ITenantRouteMatcher {
     public Map<String, IMatchedRoutes> matchAll(Set<String> topics,
                                                 int maxPersistentFanoutCount,
                                                 int maxGroupFanoutCount) {
-        final Timer.Sample sample = Timer.start();
         Map<String, IMatchedRoutes> matchedRoutes = new HashMap<>();
         TopicTrieNode.Builder<String> topicTrieBuilder = TopicTrieNode.builder(false);
         topics.forEach(topic -> {
@@ -154,7 +149,6 @@ class TenantRouteMatcher implements ITenantRouteMatcher {
                         }
                     }
                 }
-                sample.stop(timer);
                 return matchedRoutes;
             }
         }

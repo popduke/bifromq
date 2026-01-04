@@ -20,5 +20,7 @@
 package org.apache.bifromq.dist.worker.cache.task;
 
 public abstract class TenantRouteCacheTask {
+    public final long startNanos = System.nanoTime();
+
     public abstract CacheTaskType type();
 }

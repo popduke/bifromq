@@ -33,8 +33,6 @@ import static org.testng.Assert.assertNotNull;
 import static org.testng.Assert.assertTrue;
 
 import com.google.protobuf.ByteString;
-import io.micrometer.core.instrument.Timer;
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -58,7 +56,6 @@ import org.apache.bifromq.plugin.eventcollector.IEventCollector;
 import org.apache.bifromq.plugin.eventcollector.distservice.GroupFanoutThrottled;
 import org.apache.bifromq.plugin.eventcollector.distservice.PersistentFanoutThrottled;
 import org.apache.bifromq.util.BSUtil;
-import org.testng.annotations.AfterMethod;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
@@ -66,9 +63,7 @@ public class TenantRouteMatcherTest {
     private static final String TENANT_ID = "tenantA";
     private static final String OTHER_TENANT = "tenantB";
 
-    private SimpleMeterRegistry meterRegistry;
     private RecordingEventCollector eventCollector;
-    private Timer matchTimer;
 
     private static NavigableMap<ByteString, ByteString> newTreeMap() {
         return new TreeMap<>(ByteString.unsignedLexicographicalComparator());
@@ -76,14 +71,7 @@ public class TenantRouteMatcherTest {
 
     @BeforeMethod
     public void setUp() {
-        meterRegistry = new SimpleMeterRegistry();
         eventCollector = new RecordingEventCollector();
-        matchTimer = meterRegistry.timer("tenantRouteMatch");
-    }
-
-    @AfterMethod
-    public void tearDown() {
-        meterRegistry.close();
     }
 
     @Test
@@ -96,7 +84,7 @@ public class TenantRouteMatcherTest {
 
         Set<String> topics = Set.of("sensors/device1/temp", "sensors/device1/humidity");
         TenantRouteMatcher matcher =
-            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector, matchTimer);
+            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector);
 
         Map<String, IMatchedRoutes> matchedRoutes = matcher.matchAll(topics, 10, 10);
 
@@ -124,7 +112,7 @@ public class TenantRouteMatcherTest {
             BSUtil.toByteString(humidityRoute.incarnation()));
 
         TenantRouteMatcher matcher =
-            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector, matchTimer);
+            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector);
 
         Set<String> topics = Set.of(
             "sensors/device1/temp",
@@ -158,7 +146,7 @@ public class TenantRouteMatcherTest {
             BSUtil.toByteString(secondRoute.incarnation()));
 
         TenantRouteMatcher matcher =
-            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector, matchTimer);
+            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector);
 
         Set<String> topics = Set.of("devices/a/status", "devices/b/status");
 
@@ -189,7 +177,7 @@ public class TenantRouteMatcherTest {
             RouteGroup.newBuilder().putAllMembers(groupMatching.receivers()).build().toByteString());
 
         TenantRouteMatcher matcher =
-            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector, matchTimer);
+            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector);
 
         Set<String> topics = Set.of("alerts/site1/device1/temperature", "alerts/site1/device2/temperature");
 
@@ -218,7 +206,7 @@ public class TenantRouteMatcherTest {
             BSUtil.toByteString(valid.incarnation()));
 
         TreeMapKVReader kvReader = new TreeMapKVReader(kvData);
-        TenantRouteMatcher matcher = new TenantRouteMatcher(TENANT_ID, () -> kvReader, eventCollector, matchTimer);
+        TenantRouteMatcher matcher = new TenantRouteMatcher(TENANT_ID, () -> kvReader, eventCollector);
 
         Set<String> topics = Set.of("metrics/server1/cpu");
 
@@ -252,9 +240,9 @@ public class TenantRouteMatcherTest {
         Supplier<IKVRangeRefreshableReader> readerSupplier = () -> new TreeMapKVReader(kvData);
 
         TenantRouteMatcher matcherTenant =
-            new TenantRouteMatcher(TENANT_ID, readerSupplier, eventCollector, matchTimer);
+            new TenantRouteMatcher(TENANT_ID, readerSupplier, eventCollector);
         TenantRouteMatcher matcherOther =
-            new TenantRouteMatcher(OTHER_TENANT, readerSupplier, eventCollector, matchTimer);
+            new TenantRouteMatcher(OTHER_TENANT, readerSupplier, eventCollector);
 
         Set<String> topics = Set.of("devices/a/signal");
 
@@ -282,7 +270,7 @@ public class TenantRouteMatcherTest {
             BSUtil.toByteString(second.incarnation()));
 
         TenantRouteMatcher matcher =
-            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector, matchTimer);
+            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector);
 
         Map<String, IMatchedRoutes> matchedRoutes =
             matcher.matchAll(Set.of("alarms/device1/critical"), 1, 10);
@@ -322,7 +310,7 @@ public class TenantRouteMatcherTest {
             RouteGroup.newBuilder().putAllMembers(second.receivers()).build().toByteString());
 
         TenantRouteMatcher matcher =
-            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector, matchTimer);
+            new TenantRouteMatcher(TENANT_ID, () -> new TreeMapKVReader(kvData), eventCollector);
 
         Map<String, IMatchedRoutes> matchedRoutes =
             matcher.matchAll(Set.of("jobs/job1/progress"), 10, 1);
